@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.f3d
+*.f3z
+.DS_Store
