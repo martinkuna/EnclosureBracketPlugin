@@ -1,13 +1,13 @@
-# Author-Martin
-# Description-Parametric device mounting bracket generator for structured media
-#             enclosures (Legrand On-Q and similar). Builds a native Fusion 360
-#             timeline driven by live user parameters. Designed for FDM printing.
+# -*- coding: utf-8 -*-
+# Author: Martin Kuna
+# Description: Parametric device mounting bracket generator for structured media
+#              enclosures (Legrand On-Q and similar).  Runs as a Fusion 360
+#              Add-In with a native command dialog.  Designed for FDM printing.
 #
-#   Fusion 360 -> Utilities -> ADD-INS -> Scripts and Add-Ins -> Scripts -> "+"
-#   Point it at the folder containing this file, then Run.
-#
-#   Run into an EMPTY, NEW design. User parameters are document-wide, so a
-#   second bracket in the same document needs a different PARAM_PREFIX.
+#   Installation:
+#     Utilities > ADD-INS > Scripts and Add-Ins > Add-Ins tab > "+"
+#     Point it at this folder, then click Run (optionally "Run on Startup").
+#     The command appears in SOLID > CREATE > "Enclosure Bracket".
 
 import adsk.core
 import adsk.fusion
@@ -15,188 +15,58 @@ import math
 import traceback
 
 # =============================================================================
-#  CONFIGURATION  --  edit this block, save, re-run the script
+#  Add-in identity
 # =============================================================================
+CMD_ID       = 'EnclosureBracketGen'
+CMD_NAME     = 'Enclosure Bracket'
+CMD_DESC     = ('Generate a parametric device mounting bracket for '
+                'media enclosures (Legrand On-Q and similar).')
+WORKSPACE_ID = 'FusionSolidEnvironment'
+PANEL_ID     = 'SolidCreatePanel'
 
-PRESET = 'ucg_fiber'
+_handlers = []   # keep event-handler references alive (GC protection)
 
-# Prefix for every Fusion user parameter this script creates. Leave '' for one
-# bracket per document; set e.g. 'b2_' to build a second one alongside it.
-PARAM_PREFIX = ''
-
-# ---------------------------------------------------------------------------
-#  Device presets.
-#
-#  dev_w / dev_d  : footprint of the device as it lies on the plate (mm)
-#  dev_h          : height of the device above the plate (mm)
-#  dev_corner_r   : radius of the device's own vertical corners (mm)
-#  hook_style     : 'round'  -> hooks are arcs that wrap the corner radius
-#                   'square' -> hooks are L-shaped walls with straight legs
-#  hook_leg       : (square style only) leg length along each face (mm)
-#
-#  >>> MEASURE YOUR DEVICE WITH CALIPERS. These are starting points, not gospel.
-#      A press-fit bracket is only as good as the numbers you feed it.
-# ---------------------------------------------------------------------------
-PRESETS = {
-    'ucg_fiber': {
-        'label':        'UniFi Cloud Gateway Fiber  [VERIFY DIMENSIONS]',
-        'dev_w':        220.0,
-        'dev_d':        105.0,
-        'dev_h':         45.0,
-        'dev_corner_r':  10.0,
-        'hook_style':   'round',
-    },
-    'mac_mini_m4': {
-        'label':        'Mac mini (M4, 2024)  [VERIFY DIMENSIONS]',
-        'dev_w':        127.0,
-        'dev_d':        127.0,
-        'dev_h':         50.0,
-        'dev_corner_r':  12.0,
-        'hook_style':   'round',
-    },
-    'mac_mini_m2': {
-        'label':        'Mac mini (M1/M2, 2020-2023)  [VERIFY DIMENSIONS]',
-        'dev_w':        197.0,
-        'dev_d':        197.0,
-        'dev_h':         36.0,
-        'dev_corner_r':  15.0,
-        'hook_style':   'round',
-    },
-    'rpi5_case': {
-        'label':        'Raspberry Pi 5 in official case  [VERIFY DIMENSIONS]',
-        'dev_w':         92.0,
-        'dev_d':         62.0,
-        'dev_h':         32.0,
-        'dev_corner_r':   4.0,
-        'hook_style':   'square',
-        'hook_leg':      16.0,
-    },
-    'rpi_bare': {
-        'label':        'Raspberry Pi bare board (4B / 5)',
-        'dev_w':         85.0,
-        'dev_d':         56.0,
-        'dev_h':         20.0,
-        'dev_corner_r':   3.0,
-        'hook_style':   'square',
-        'hook_leg':      14.0,
-    },
-    'hdd_35': {
-        'label':        '3.5 inch hard drive',
-        'dev_w':        147.0,
-        'dev_d':        101.6,
-        'dev_h':         26.1,
-        'dev_corner_r':   2.0,
-        'hook_style':   'square',
-        'hook_leg':      22.0,
-    },
-    'hdd_25': {
-        'label':        '2.5 inch hard drive / SSD (9.5 mm)',
-        'dev_w':        100.0,
-        'dev_d':         69.85,
-        'dev_h':          9.5,
-        'dev_corner_r':   2.0,
-        'hook_style':   'square',
-        'hook_leg':      18.0,
-    },
-    'custom': {
-        'label':        'Custom device',
-        'dev_w':        150.0,
-        'dev_d':        100.0,
-        'dev_h':         30.0,
-        'dev_corner_r':   5.0,
-        'hook_style':   'square',
-        'hook_leg':      18.0,
-    },
-}
-
-# ---------------------------------------------------------------------------
-#  Applies to whichever preset is selected.
-#  Set a value to None to accept the automatic default.
-# ---------------------------------------------------------------------------
-CFG = {
-    # ---- fit -------------------------------------------------------------
-    'fit_clear':      0.40,   # per-side gap between device and hook inner face
-    'hook_h_adj':     0.20,   # hook wall height = dev_h + this (+ = looser)
-
-    # ---- plate -----------------------------------------------------------
-    'plate_t':        5.00,   # main plate thickness
-    'plate_corner_r': None,   # outer corner radius. None -> auto per hook style
-
-    # ---- hooks -----------------------------------------------------------
-    'hook_t':         2.80,   # hook wall thickness (7 perimeters @ 0.4 nozzle)
-    'hook_lip':       1.20,   # inward retaining lip at the top of each hook
-    'hook_lip_h':     1.60,   # lip height. Keep >= hook_lip so the underside
-                              # ramp stays at or below 45 deg and prints clean
-    'hook_inner_r':   1.50,   # (square style) fillet inside the L
-    'hook_fillet':    3.00,   # fillet where hook meets plate. 0 disables
-    'base_chamfer':   0.50,   # chamfer on the bottom face. 0 disables
-
-    # ---- waisted outline -------------------------------------------------
-    'waist_d_x':      None,   # cut depth on the +/-X edges. None -> auto
-    'waist_d_y':      None,   # cut depth on the +/-Y edges. None -> auto
-    'waist_margin':   3.00,   # keep the waist this far clear of the hook legs
-
-    # ---- central opening -------------------------------------------------
-    'center_cut':     True,
-    'center_l':       None,   # None -> auto
-    'center_w':       None,   # None -> auto
-
-    # ---- plunger slots ---------------------------------------------------
-    'slot_w':         6.60,   # plunger shaft width  (shaft measures ~6.5)
-    'inset_w':        9.40,   # plunger lip pocket width (lip measures ~8.8)
-    'inset_t':        3.00,   # material left under the lip. Pocket depth is
-                              # plate_t - inset_t
-    'corner_slots':   True,   # 4 diagonal slots, one per corner pad
-    'corner_slot_len': None,  # None -> auto, as long as the pad allows
-    'side_slots':     True,   # a pair of slots on a centreline
-    'side_slot_axis': 'auto',  # 'x', 'y', 'both', or 'auto' (X, else Y)
-    'side_slot_len':  None,   # None -> auto
-    'edge_margin':    2.50,   # min material between a slot pocket and an edge
-
-    # ---- straps ----------------------------------------------------------
-    # Each entry adds a PAIR of strap slots straddling the device.
-    #   axis   : 'x' strap runs along X (slots sit on the +/-X sides)
-    #            'y' strap runs along Y (slots sit on the +/-Y sides)
-    #   width  : strap width
-    #   thick  : strap thickness (the short dimension of the slot)
-    #   offset : distance from plate centre to each slot. None -> auto
-    'straps': [
-        # {'axis': 'x', 'width': 25.0, 'thick': 3.5, 'offset': None},
-    ],
-
-    # ---- extra user-defined slots ----------------------------------------
-    #   x, y   : centre position in mm from plate centre
-    #   ang    : degrees, 0 = along X
-    #   len    : overall length including the end radii
-    #   width  : slot width (default slot_w)
-    #   inset  : True to add the plunger lip pocket around it
-    'extra_slots': [
-        # {'x': 0.0, 'y': 30.0, 'ang': 0.0, 'len': 30.0, 'width': 6.6,
-        #  'inset': True},
-    ],
-
-    # ---- vents -----------------------------------------------------------
-    'vents':          False,
-    'vent_d':         6.00,
-    'vent_pitch':    10.00,
-    'vent_pattern':  'hex',   # 'hex' or 'grid'
-    'vent_margin':    2.50,
-}
+PARAM_PREFIX = ''   # prefix for every Fusion user-parameter created
 
 # =============================================================================
-#  END OF CONFIGURATION
+#  Device presets
 # =============================================================================
+PRESETS = [
+    {'key': 'ucg_fiber',   'label': 'UniFi Cloud Gateway Fiber',
+     'dev_w': 220.0, 'dev_d': 105.0,  'dev_h':  45.0, 'dev_corner_r': 10.0,
+     'hook_style': 'round',  'hook_leg':  0.0},
+    {'key': 'mac_mini_m4', 'label': 'Mac mini (M4, 2024)',
+     'dev_w': 127.0, 'dev_d': 127.0,  'dev_h':  50.0, 'dev_corner_r': 12.0,
+     'hook_style': 'round',  'hook_leg':  0.0},
+    {'key': 'mac_mini_m2', 'label': 'Mac mini (M1/M2, 2020-2023)',
+     'dev_w': 197.0, 'dev_d': 197.0,  'dev_h':  36.0, 'dev_corner_r': 15.0,
+     'hook_style': 'round',  'hook_leg':  0.0},
+    {'key': 'rpi5_case',   'label': 'Raspberry Pi 5 - official case',
+     'dev_w':  92.0, 'dev_d':  62.0,  'dev_h':  32.0, 'dev_corner_r':  4.0,
+     'hook_style': 'square', 'hook_leg': 16.0},
+    {'key': 'rpi_bare',    'label': 'Raspberry Pi bare board (4B/5)',
+     'dev_w':  85.0, 'dev_d':  56.0,  'dev_h':  20.0, 'dev_corner_r':  3.0,
+     'hook_style': 'square', 'hook_leg': 14.0},
+    {'key': 'hdd_35',      'label': '3.5 inch hard drive',
+     'dev_w': 147.0, 'dev_d': 101.6,  'dev_h':  26.1, 'dev_corner_r':  2.0,
+     'hook_style': 'square', 'hook_leg': 22.0},
+    {'key': 'hdd_25',      'label': '2.5 inch hard drive / SSD (9.5 mm)',
+     'dev_w': 100.0, 'dev_d':  69.85, 'dev_h':   9.5, 'dev_corner_r':  2.0,
+     'hook_style': 'square', 'hook_leg': 18.0},
+    {'key': 'custom',      'label': 'Custom device',
+     'dev_w': 150.0, 'dev_d': 100.0,  'dev_h':  30.0, 'dev_corner_r':  5.0,
+     'hook_style': 'square', 'hook_leg': 18.0},
+]
 
-MM = 0.1          # Fusion internal units are cm; multiply mm by this
+MM   = 0.1    # Fusion internal units are cm; multiply mm by this
 _EPS = 1e-7
 
 
-# -----------------------------------------------------------------------------
-#  Pure-python geometry (defaults and vent culling)
-# -----------------------------------------------------------------------------
+# =============================================================================
+#  Pure-python geometry helpers
+# =============================================================================
 
 def _seg_dist(px, py, ax, ay, bx, by):
-    """Shortest distance from point P to segment AB."""
     dx, dy = bx - ax, by - ay
     L2 = dx * dx + dy * dy
     if L2 < _EPS:
@@ -207,7 +77,6 @@ def _seg_dist(px, py, ax, ay, bx, by):
 
 
 def _rounded_rect_inset(px, py, half_l, half_w, r):
-    """How far inside a rounded rectangle a point sits. Negative = outside."""
     qx = abs(px) - (half_l - r)
     qy = abs(py) - (half_w - r)
     if qx <= 0.0 and qy <= 0.0:
@@ -218,15 +87,9 @@ def _rounded_rect_inset(px, py, half_l, half_w, r):
 
 
 def waist_fit(ref_x, ref_r, want_depth, min_radius=3.0):
-    """Work out a scallop that blends cleanly into the corner.
-
-    The blend radius is r = (ref_x^2 + d^2) / (2d) - ref_r, which goes
-    negative once the corner arcs have eaten most of the edge. Returns
-    (depth, radius), or None when the edge has no room for a waist at all.
-    """
     if ref_x <= 1.0:
         return None
-    d_max = ref_x * 0.5                       # keep the scallop gentle
+    d_max = ref_x * 0.5
     c = ref_r + min_radius
     if c > ref_x:
         d_max = min(d_max, c - math.sqrt(max(c * c - ref_x * ref_x, 0.0)))
@@ -240,11 +103,6 @@ def waist_fit(ref_x, ref_r, want_depth, min_radius=3.0):
 
 
 def make_plate_clearance(plate_l, plate_w, corner_r, discs):
-    """Return f(x, y) -> distance into the plate. Negative means outside.
-
-    The plate is the rounded rectangle minus the waist discs, so this is the
-    exact region every slot has to live inside.
-    """
     hl, hw = plate_l / 2.0, plate_w / 2.0
 
     def f(x, y):
@@ -257,8 +115,6 @@ def make_plate_clearance(plate_l, plate_w, corner_r, discs):
 
 def fit_on_ray(ox, oy, ux, uy, need, clear_fn, keep_outs,
                s_min, s_max, step=0.25):
-    """Longest contiguous run along a ray with room for a slot of half-width
-    `need`. Returns (s_lo, s_hi) or None."""
     best = None
     run_start = None
     run_end = None
@@ -283,14 +139,6 @@ def fit_on_ray(ox, oy, ux, uy, need, clear_fn, keep_outs,
 
 
 class HookBand(object):
-    """Keep-out for the annular sector a round hook wall stands on.
-
-    Respecting the angular sweep matters: treating the whole ring as forbidden
-    pushes the corner slots away from the corner pads for no reason, while
-    ignoring the ring entirely lets a slot in one corner undercut a
-    neighbouring corner's wall on small plates with large corner radii.
-    """
-
     def __init__(self, cx, cy, r_in, r_out, a0_deg, a1_deg):
         self.cx, self.cy = cx, cy
         self.r_in, self.r_out = r_in, r_out
@@ -306,8 +154,6 @@ class HookBand(object):
             if d >= self.r_out:
                 return d - self.r_out
             return -min(d - self.r_in, self.r_out - d)
-        # Outside the sweep the nearest point lies on one of the two radial
-        # end faces of the sector.
         best = 1e18
         for a in (self.a0, self.a1):
             ar = math.radians(a)
@@ -320,9 +166,6 @@ class HookBand(object):
 
 
 class AxisStrip(object):
-    """Keep-out that holds a feature off one axis, so that the feature and its
-    mirror image cannot run into each other."""
-
     def __init__(self, axis):
         self.axis = axis
 
@@ -331,8 +174,6 @@ class AxisStrip(object):
 
 
 class Stadium(object):
-    """An obround / slot: segment A-B swept with radius r."""
-
     def __init__(self, cx, cy, ang_deg, length, width):
         self.r = width / 2.0
         half = max((length - width) / 2.0, 0.0)
@@ -346,13 +187,12 @@ class Stadium(object):
         self.width = width
 
     def clearance(self, px, py):
-        """Distance from P to the boundary. Negative = inside."""
         return _seg_dist(px, py, self.ax, self.ay, self.bx, self.by) - self.r
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 #  Fusion helpers
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def _pt(x_mm, y_mm):
     return adsk.core.Point3D.create(x_mm * MM, y_mm * MM, 0.0)
@@ -363,8 +203,6 @@ def _vs(expr):
 
 
 class Builder(object):
-    """Shared state for one bracket build."""
-
     def __init__(self, app, ui, design, comp):
         self.app = app
         self.ui = ui
@@ -378,7 +216,6 @@ class Builder(object):
     # -- parameters --------------------------------------------------------
 
     def P(self, name):
-        """Prefixed parameter name, for use inside expressions."""
         return PARAM_PREFIX + name
 
     def param(self, name, expr, units='mm', comment=''):
@@ -400,8 +237,6 @@ class Builder(object):
                 'mismatch inside the expression.' % (full, expr))
 
     def try_param(self, name, expr, fallback_expr, units='mm', comment=''):
-        """Create a parameter, falling back to a literal if the expression is
-        rejected (some Fusion builds are fussy about mixed-unit maths)."""
         try:
             return self.param(name, expr, units, comment)
         except Exception:
@@ -411,11 +246,10 @@ class Builder(object):
             return self.param(name, fallback_expr, units, comment)
 
     def pval(self, name):
-        """Current value of one of our parameters, in mm."""
         p = self.design.userParameters.itemByName(self.P(name))
         if p is None:
             raise RuntimeError('Parameter not found: ' + self.P(name))
-        return p.value / MM   # Fusion stores cm
+        return p.value / MM
 
     def set_dim(self, dim, expr):
         if dim is None or not expr:
@@ -424,6 +258,15 @@ class Builder(object):
             dim.parameter.expression = expr
         except Exception:
             self.warnings.append('Could not drive a dimension with "%s"' % expr)
+
+    # -- sketch construction axes (API changed in newer Fusion builds) ------
+
+    def _sketch_axis(self, sk, axis_name):
+        """Return xConstructionAxis / yConstructionAxis, or None if unavailable."""
+        try:
+            return getattr(sk, axis_name + 'ConstructionAxis')
+        except AttributeError:
+            return None
 
     # -- sketches ----------------------------------------------------------
 
@@ -437,13 +280,13 @@ class Builder(object):
         sk.isComputeDeferred = False
 
     def _locate_point(self, sk, pt, xv, yv, x_expr, y_expr):
-        """Pin a sketch point. Zero coordinates use an axis constraint, because
-        Fusion will not accept a zero-length dimension."""
         cons = sk.geometricConstraints
         dims = sk.sketchDimensions
         try:
             if abs(xv) < 1e-6:
-                cons.addCoincident(pt, sk.yConstructionAxis)
+                y_ax = self._sketch_axis(sk, 'y')
+                if y_ax is not None:
+                    cons.addCoincident(pt, y_ax)
             elif x_expr:
                 self.set_dim(dims.addDistanceDimension(
                     sk.originPoint, pt,
@@ -454,7 +297,9 @@ class Builder(object):
             self.warnings.append('Could not position a sketch point in X')
         try:
             if abs(yv) < 1e-6:
-                cons.addCoincident(pt, sk.xConstructionAxis)
+                x_ax = self._sketch_axis(sk, 'x')
+                if x_ax is not None:
+                    cons.addCoincident(pt, x_ax)
             elif y_expr:
                 self.set_dim(dims.addDistanceDimension(
                     sk.originPoint, pt,
@@ -466,7 +311,6 @@ class Builder(object):
 
     def draw_stadium(self, sk, geo, x_expr=None, y_expr=None,
                      axis_expr=None, r_expr=None, ref_lines=None):
-        """Draw an obround as one closed profile."""
         arcs = sk.sketchCurves.sketchArcs
         lines = sk.sketchCurves.sketchLines
         cons = sk.geometricConstraints
@@ -526,19 +370,28 @@ class Builder(object):
             pass
 
         if r_expr:
-            self.set_dim(sk.sketchDimensions.addRadialDimension(
-                arc_a, _pt(geo.ax - 6.0, geo.ay - 6.0)), r_expr)
+            try:
+                self.set_dim(sk.sketchDimensions.addRadialDimension(
+                    arc_a, _pt(geo.ax - 6.0, geo.ay - 6.0)), r_expr)
+            except Exception:
+                pass
             try:
                 cons.addEqual(arc_a, arc_b)
             except Exception:
-                self.set_dim(sk.sketchDimensions.addRadialDimension(
-                    arc_b, _pt(geo.bx + 6.0, geo.by + 6.0)), r_expr)
+                try:
+                    self.set_dim(sk.sketchDimensions.addRadialDimension(
+                        arc_b, _pt(geo.bx + 6.0, geo.by + 6.0)), r_expr)
+                except Exception:
+                    pass  # arcs are drawn equal; constraint is non-critical
 
         if axis_expr and (geo.length - geo.width) > 0.05:
-            self.set_dim(sk.sketchDimensions.addDistanceDimension(
-                arc_a.centerSketchPoint, arc_b.centerSketchPoint,
-                adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
-                _pt(geo.cx, geo.cy + 5.0)), axis_expr)
+            try:
+                self.set_dim(sk.sketchDimensions.addDistanceDimension(
+                    arc_a.centerSketchPoint, arc_b.centerSketchPoint,
+                    adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
+                    _pt(geo.cx, geo.cy + 5.0)), axis_expr)
+            except Exception:
+                pass
 
         self._locate_point(sk, mid, geo.cx, geo.cy, x_expr, y_expr)
         return {'arcs': (arc_a, arc_b), 'axis': axis, 'mid': mid}
@@ -546,7 +399,6 @@ class Builder(object):
     def draw_rounded_rect(self, sk, half_l, half_w, r,
                           l_expr=None, w_expr=None, r_expr=None,
                           symmetric=True):
-        """Rounded rectangle centred on the sketch origin."""
         arcs = sk.sketchCurves.sketchArcs
         lines = sk.sketchCurves.sketchLines
         cons = sk.geometricConstraints
@@ -609,8 +461,14 @@ class Builder(object):
                 L['bot'], L['top'], _pt(half_l * 0.45, 0.0)), w_expr)
 
         if symmetric:
-            for e1, e2, ax in ((L['left'], L['right'], sk.yConstructionAxis),
-                               (L['bot'], L['top'], sk.xConstructionAxis)):
+            # xConstructionAxis / yConstructionAxis were removed in newer
+            # Fusion builds; fall back gracefully when unavailable.
+            y_ax = self._sketch_axis(sk, 'y')
+            x_ax = self._sketch_axis(sk, 'x')
+            for e1, e2, ax in ((L['left'], L['right'], y_ax),
+                               (L['bot'],  L['top'],   x_ax)):
+                if ax is None:
+                    continue
                 try:
                     cons.addSymmetry(e1, e2, ax)
                 except Exception:
@@ -620,7 +478,6 @@ class Builder(object):
 
     def draw_arc_band(self, sk, cx, cy, r_out, r_in, a0_deg, a1_deg,
                       x_expr=None, y_expr=None, ri_expr=None):
-        """An annular band segment: the 'round' hook."""
         arcs = sk.sketchCurves.sketchArcs
         lines = sk.sketchCurves.sketchLines
         cons = sk.geometricConstraints
@@ -646,7 +503,7 @@ class Builder(object):
         cap1 = lines.addByTwoPoints(inner.endSketchPoint,
                                     outer.endSketchPoint)
 
-        for ln in (cap0, cap1):          # keep the end caps radial
+        for ln in (cap0, cap1):
             try:
                 cons.addCoincident(outer.centerSketchPoint, ln)
             except Exception:
@@ -662,13 +519,6 @@ class Builder(object):
 
     def draw_L_hook(self, sk, sx, sy, inner_x, inner_y, outer_x, outer_y,
                     stop_x, stop_y, fillet_r):
-        """L-shaped corner hook as a single closed profile.
-
-        sx, sy         : corner signs
-        inner_x/inner_y: inside faces (against the device)
-        outer_x/outer_y: outside faces, built proud and trimmed later
-        stop_x/stop_y  : inboard ends of each leg
-        """
         lines = sk.sketchCurves.sketchLines
         pts = [
             (sx * inner_x, sy * stop_y),
@@ -690,7 +540,6 @@ class Builder(object):
             prev = p
         segs.append(lines.addByTwoPoints(_pt(*prev), _pt(*first)))
 
-        # stitch the polygon closed
         cons = sk.geometricConstraints
         for i in range(len(segs)):
             a = segs[i]
@@ -700,7 +549,6 @@ class Builder(object):
             except Exception:
                 pass
 
-        # relieve the inside corner of the L (segs[4] and segs[5] meet there)
         if fillet_r > 0.01:
             try:
                 sk.sketchCurves.sketchArcs.addFillet(
@@ -756,14 +604,13 @@ class Builder(object):
         return ext.add(ei)
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 #  The build
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def build(b, dev, cfg):
     P = b.P
 
-    # ---------------- resolve the numbers -----------------------------------
     b.stage = 'resolving dimensions'
 
     style = dev.get('hook_style', 'round')
@@ -782,9 +629,6 @@ def build(b, dev, cfg):
     hook_leg = 0.0
 
     if style == 'round':
-        # A circular hook can only exceed the device's own corner radius by
-        # about 3.4 x the fit clearance before the device corner fouls it,
-        # so the hook radius is pinned to the device. See README.
         corner_r = hook_ir + hook_t
     else:
         hook_leg = dev.get('hook_leg', 16.0)
@@ -797,10 +641,6 @@ def build(b, dev, cfg):
     corner_r = max(corner_r, 0.5)
     corner_r = min(corner_r, 0.45 * min(plate_l, plate_w))
 
-    # Waist depths. Both are keyed to the SMALLER plate dimension: scaling the
-    # short-edge scallop by the long dimension makes it cut absurdly deep on a
-    # long thin plate, and the tight blend radius that follows bulges into the
-    # middle of the part.
     frac = 0.16 if style == 'round' else 0.13
     base = min(plate_l, plate_w)
     want_wdy = cfg['waist_d_y'] if cfg['waist_d_y'] is not None \
@@ -808,8 +648,6 @@ def build(b, dev, cfg):
     want_wdx = cfg['waist_d_x'] if cfg['waist_d_x'] is not None \
         else min(frac * base, 0.30 * plate_l)
 
-    # What the waist arc blends into: the corner arc (round hooks) or the
-    # inboard end of the hook leg (square hooks).
     wm = cfg['waist_margin']
     if style == 'round':
         ref_x_y, ref_r_y = plate_l / 2.0 - corner_r, corner_r
@@ -819,9 +657,6 @@ def build(b, dev, cfg):
         ref_x_x = plate_w / 2.0 - hook_leg - wm
         ref_r_y = ref_r_x = 0.0
 
-    # Either edge may simply have no room for a scallop, e.g. when the corner
-    # arcs already consume the whole short edge. That is fine; the edge just
-    # stays straight and the hooks get trimmed by the outline instead.
     fit_y = waist_fit(ref_x_y, ref_r_y, want_wdy)
     fit_x = waist_fit(ref_x_x, ref_r_x, want_wdx)
     waist_on_y = fit_y is not None
@@ -844,7 +679,6 @@ def build(b, dev, cfg):
     if waist_on_x:
         discs += [(waist_cx, 0.0, waist_r_x), (-waist_cx, 0.0, waist_r_x)]
 
-    # central opening
     center_l = cfg['center_l'] if cfg['center_l'] is not None \
         else max(plate_l * 0.42, 12.0)
     max_cw = plate_w - 2.0 * waist_d_y - 8.0
@@ -856,7 +690,6 @@ def build(b, dev, cfg):
 
     hook_h = dev_h + cfg['hook_h_adj']
 
-    # ---------------- user parameters ---------------------------------------
     b.stage = 'creating user parameters'
 
     b.param('dev_w', '%.4f mm' % dev_w, 'mm', 'Device width (X)')
@@ -896,8 +729,6 @@ def build(b, dev, cfg):
                     math.atan2(cfg['hook_lip'], max(cfg['hook_lip_h'], 1e-6))),
                 'deg', 'Lip underside ramp angle (auto)')
 
-    # radius = (ref_x^2 + d^2) / (2d) - ref_r, written as products so the
-    # units resolve to mm rather than mm^2
     if waist_on_y:
         b.param('waist_d_y', '%.4f mm' % waist_d_y, 'mm',
                 'Waist cut depth, long edges')
@@ -954,7 +785,6 @@ def build(b, dev, cfg):
         b.param('vent_d', '%.4f mm' % cfg['vent_d'], 'mm',
                 'Vent hole diameter')
 
-    # ---------------- plate -------------------------------------------------
     b.stage = 'plate outline'
     sk = b.new_sketch('plate_outline')
     b.draw_rounded_rect(sk, plate_l / 2.0, plate_w / 2.0, corner_r,
@@ -972,16 +802,12 @@ def build(b, dev, cfg):
     b.body = ext.add(ei).bodies.item(0)
     b.body.name = 'Bracket'
 
-    # ---------------- hooks -------------------------------------------------
     b.stage = 'hook walls'
-    over = 0.8            # build proud, then trim back to the plate outline
+    over = 0.8
     cx = plate_l / 2.0 - corner_r
     cy = plate_w / 2.0 - corner_r
     signs = ((1, 1), (-1, 1), (-1, -1), (1, -1))
 
-    # Sweep from where the short-edge waist meets the corner round to where
-    # the long-edge waist meets it. With no waist on an edge the band just
-    # runs to the tangent point and the outline trim takes care of it.
     hook_bands = []
     if style == 'round':
         a_hi = math.degrees(math.atan2(waist_cy - cy, -cx)) \
@@ -1003,8 +829,6 @@ def build(b, dev, cfg):
 
     sk_h = b.new_sketch('hooks')
     if style == 'round':
-        # Draw proud of the final sweep so the trim always removes a real
-        # sliver instead of landing exactly on a tangent face.
         margin = 8.0
         for ccx, ccy, r0, r1 in hook_bands:
             b.draw_arc_band(
@@ -1029,19 +853,14 @@ def build(b, dev, cfg):
               adsk.fusion.FeatureOperations.JoinFeatureOperation,
               P('hook_h'), start_expr=P('plate_t'))
 
-    # ---------------- retaining lip -----------------------------------------
     if cfg['hook_lip'] > 0.001:
         b.stage = 'retaining lip'
-        # A tapered extrude grows the band in every direction. The inward
-        # growth is the lip, with a printable ramp underneath; the outward
-        # growth is trimmed off in the next step.
         b.extrude(hook_profiles,
                   adsk.fusion.FeatureOperations.JoinFeatureOperation,
                   P('hook_lip_h'),
                   start_expr='%s + %s' % (P('plate_t'), P('hook_h')),
                   taper_expr=P('hook_taper'))
 
-    # ---------------- trim everything above the plate to the outline --------
     b.stage = 'trimming hooks to the plate outline'
     sk_trim = b.new_sketch('outline_trim')
     sk_trim.sketchCurves.sketchLines.addTwoPointRectangle(
@@ -1052,7 +871,6 @@ def build(b, dev, cfg):
                         r_expr=P('corner_r'))
     b.close_sketch(sk_trim)
 
-    # The frame is the only profile with a hole in it, i.e. two loops.
     frame = adsk.core.ObjectCollection.create()
     for i in range(sk_trim.profiles.count):
         pr = sk_trim.profiles.item(i)
@@ -1064,7 +882,6 @@ def build(b, dev, cfg):
     else:
         b.cut_through_all(frame, start_expr=P('plate_t'))
 
-    # ---------------- waist cuts --------------------------------------------
     if discs:
         b.stage = 'waist cuts'
         sk_w = b.new_sketch('waist')
@@ -1079,16 +896,18 @@ def build(b, dev, cfg):
                 c, _pt(ccx + rr * 0.7, ccy)), r_expr)
             try:
                 if on_y:
-                    cons.addCoincident(c.centerSketchPoint,
-                                       sk_w.yConstructionAxis)
+                    y_ax = b._sketch_axis(sk_w, 'y')
+                    if y_ax is not None:
+                        cons.addCoincident(c.centerSketchPoint, y_ax)
                     b.set_dim(dims.addDistanceDimension(
                         sk_w.originPoint, c.centerSketchPoint,
                         adsk.fusion.DimensionOrientations
                         .VerticalDimensionOrientation,
                         _pt(6.0, ccy * 0.5)), P('waist_cy'))
                 else:
-                    cons.addCoincident(c.centerSketchPoint,
-                                       sk_w.xConstructionAxis)
+                    x_ax = b._sketch_axis(sk_w, 'x')
+                    if x_ax is not None:
+                        cons.addCoincident(c.centerSketchPoint, x_ax)
                     b.set_dim(dims.addDistanceDimension(
                         sk_w.originPoint, c.centerSketchPoint,
                         adsk.fusion.DimensionOrientations
@@ -1099,7 +918,6 @@ def build(b, dev, cfg):
         b.close_sketch(sk_w)
         b.cut_through_all(b.all_profiles(sk_w))
 
-    # ---------------- slot layout -------------------------------------------
     b.stage = 'slot layout'
     slots = []
 
@@ -1113,9 +931,6 @@ def build(b, dev, cfg):
     slot_w = cfg['slot_w']
     em = cfg['edge_margin']
 
-    # A slot's lip pocket is the widest thing that has to fit, so every
-    # default is sized by scanning the real plate region rather than by a
-    # rule of thumb. need = half the pocket width plus the edge margin.
     need = inset_w / 2.0 + em
     max_len = max(min(46.0, 0.32 * min(plate_l, plate_w)), 14.0)
     max_axis = max_len - slot_w
@@ -1123,19 +938,15 @@ def build(b, dev, cfg):
     keep_outs = []
     if cfg['center_cut']:
         keep_outs.append(Stadium(0.0, 0.0, 0.0, center_l, center_w))
-    # A slot pocket must never undercut a hook wall's footing: the wall would
-    # be left standing on a 3 mm ledge and the plunger head would foul it.
     for ccx, ccy, r0, r1 in hook_bands:
         keep_outs.append(HookBand(ccx, ccy, hook_ir, corner_r, r0, r1))
 
     if cfg['corner_slots']:
         u = 1.0 / math.sqrt(2.0)
         if style == 'round':
-            s_cap = corner_r + 10.0        # the rings do the real limiting
+            s_cap = corner_r + 10.0
         else:
             s_cap = min(inner_x - need - cx, inner_y - need - cy) / u
-        # Hold the slot off both axes so it cannot collide with its own mirror
-        # image on a narrow plate.
         span = fit_on_ray(cx, cy, u, u, need, clear_fn,
                           keep_outs + [AxisStrip('x'), AxisStrip('y')],
                           -math.hypot(plate_l, plate_w) / 2.0, s_cap)
@@ -1155,8 +966,6 @@ def build(b, dev, cfg):
             if axis < 3.0:
                 b.warnings.append('Corner slots skipped: pad is too small.')
             else:
-                # Anchor the slot at the outboard end of the usable run so it
-                # stays on the corner pad instead of drifting to the middle.
                 s_mid = s_hi - axis / 2.0
                 gx, gy = cx + u * s_mid, cy + u * s_mid
                 c_len = axis + slot_w
@@ -1273,7 +1082,6 @@ def build(b, dev, cfg):
             len_expr='%s - %s' % (P(nm + '_len'), P(nm + '_w')),
             r_expr='%s / 2' % P(nm + '_w'))
 
-    # ---------------- central opening ---------------------------------------
     if cfg['center_cut']:
         b.stage = 'central opening'
         sk_c = b.new_sketch('center_opening')
@@ -1283,7 +1091,6 @@ def build(b, dev, cfg):
         b.close_sketch(sk_c)
         b.cut_through_all(b.all_profiles(sk_c))
 
-    # ---------------- plunger lip pockets -----------------------------------
     inset_slots = [s for s in slots if s['inset']]
     if inset_slots:
         b.stage = 'plunger lip pockets'
@@ -1291,7 +1098,6 @@ def build(b, dev, cfg):
         refs = {}
         for s in inset_slots:
             g = s['geo']
-            # Same axis endpoints as the slot, just a bigger end radius.
             pocket = Stadium(g.cx, g.cy, g.ang,
                              g.length + (inset_w - g.width), inset_w)
             b.draw_stadium(sk_i, pocket,
@@ -1303,7 +1109,6 @@ def build(b, dev, cfg):
                   adsk.fusion.FeatureOperations.CutFeatureOperation,
                   P('inset_depth'), start_expr=P('inset_t'))
 
-    # ---------------- through slots -----------------------------------------
     if slots:
         b.stage = 'through slots'
         sk_s = b.new_sketch('slots')
@@ -1316,13 +1121,11 @@ def build(b, dev, cfg):
         b.close_sketch(sk_s)
         b.cut_through_all(b.all_profiles(sk_s))
 
-    # ---------------- vents -------------------------------------------------
     if cfg['vents']:
         b.stage = 'vents'
         _add_vents(b, cfg, plate_l, plate_w, corner_r, discs,
                    center_l, center_w, slots, inset_w)
 
-    # ---------------- finishing ---------------------------------------------
     if cfg['hook_fillet'] > 0:
         b.stage = 'hook base fillet'
         _fillet_hook_base(b, style, plate_l, plate_w, corner_r,
@@ -1345,9 +1148,9 @@ def build(b, dev, cfg):
     }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 #  Vents
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def _add_vents(b, cfg, plate_l, plate_w, corner_r, discs,
                center_l, center_w, slots, inset_w):
@@ -1405,9 +1208,9 @@ def _add_vents(b, cfg, plate_l, plate_w, corner_r, discs,
     b.notes.append('%d vent holes added.' % len(pts))
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 #  Finishing features
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def _edge_mid(edge):
     ev = edge.evaluator
@@ -1420,11 +1223,6 @@ def _edge_mid(edge):
 
 def _fillet_hook_base(b, style, plate_l, plate_w, corner_r,
                       hook_ir, inner_x, inner_y):
-    """Fillet the concave junction where each hook meets the plate.
-
-    Edges are picked geometrically rather than by index, so the selection is
-    not tied to a face ordering that could change.
-    """
     z_target = b.pval('plate_t') * MM
     tol = 0.02 * MM
     cx = plate_l / 2.0 - corner_r
@@ -1448,7 +1246,6 @@ def _fillet_hook_base(b, style, plate_l, plate_w, corner_r,
                            - hook_ir) < 0.35:
                         keep = True
         else:
-            # the inside faces of the L walls, and nothing else
             if abs(abs(x) - inner_x) < 0.35 or abs(abs(y) - inner_y) < 0.35:
                 keep = True
         if keep:
@@ -1492,75 +1289,357 @@ def _chamfer_base(b):
         b.warnings.append('Base chamfer failed; skipped.')
 
 
-# -----------------------------------------------------------------------------
-#  Entry point
-# -----------------------------------------------------------------------------
+# =============================================================================
+#  Command dialog helpers
+# =============================================================================
+
+def _mm_val(s):
+    """ValueInput from a mm string, e.g. '5.00 mm'."""
+    return adsk.core.ValueInput.createByString(s)
+
+
+def _get_mm(inputs, input_id):
+    """Read a ValueCommandInput's value and convert from cm to mm."""
+    return inputs.itemById(input_id).value / MM
+
+
+def _get_bool(inputs, input_id):
+    return inputs.itemById(input_id).value
+
+
+# =============================================================================
+#  Command event handlers
+# =============================================================================
+
+class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    def __init__(self):
+        super().__init__()
+
+    def notify(self, args):
+        try:
+            cmd = args.command
+            cmd.isRepeatable = False
+
+            on_exec = _CommandExecuteHandler()
+            cmd.execute.add(on_exec)
+            _handlers.append(on_exec)
+
+            on_changed = _CommandInputChangedHandler()
+            cmd.inputChanged.add(on_changed)
+            _handlers.append(on_changed)
+
+            on_destroy = _CommandDestroyHandler()
+            cmd.destroy.add(on_destroy)
+            _handlers.append(on_destroy)
+
+            inputs = cmd.commandInputs
+
+            # -- Note ---------------------------------------------------------
+            inputs.addTextBoxCommandInput(
+                'note', '',
+                '<b>Measure your device with calipers!</b>', 2, True)
+
+            # -- Preset dropdown ----------------------------------------------
+            dd = inputs.addDropDownCommandInput(
+                'preset', 'Preset',
+                adsk.core.DropDownStyles.TextListDropDownStyle)
+            for i, p in enumerate(PRESETS):
+                dd.listItems.add(p['label'], i == 0)
+
+            p0 = PRESETS[0]
+
+            # -- Device group -------------------------------------------------
+            grp_dev = inputs.addGroupCommandInput('grp_device', 'Device dimensions')
+            gi = grp_dev.children
+
+            gi.addValueInput('dev_w', 'Width (X)', 'mm',
+                             _mm_val('%.2f mm' % p0['dev_w']))
+            gi.addValueInput('dev_d', 'Depth (Y)', 'mm',
+                             _mm_val('%.2f mm' % p0['dev_d']))
+            gi.addValueInput('dev_h', 'Height (Z)', 'mm',
+                             _mm_val('%.2f mm' % p0['dev_h']))
+            gi.addValueInput('dev_corner_r', 'Corner radius', 'mm',
+                             _mm_val('%.2f mm' % p0['dev_corner_r']))
+
+            dd_style = gi.addDropDownCommandInput(
+                'hook_style', 'Hook style',
+                adsk.core.DropDownStyles.TextListDropDownStyle)
+            dd_style.listItems.add('Round', p0['hook_style'] == 'round')
+            dd_style.listItems.add('Square', p0['hook_style'] == 'square')
+
+            inp_leg = gi.addValueInput('hook_leg', 'Hook leg length', 'mm',
+                                       _mm_val('%.2f mm' % p0['hook_leg']))
+            inp_leg.isVisible = (p0['hook_style'] == 'square')
+
+            # -- Plate & hooks group ------------------------------------------
+            grp_plt = inputs.addGroupCommandInput('grp_plate', 'Plate && hooks')
+            pi = grp_plt.children
+
+            pi.addValueInput('plate_t',     'Plate thickness',        'mm', _mm_val('5.00 mm'))
+            pi.addValueInput('fit_clear',   'Fit clearance (per side)','mm', _mm_val('0.40 mm'))
+            pi.addValueInput('hook_t',      'Hook wall thickness',     'mm', _mm_val('2.80 mm'))
+            pi.addValueInput('hook_lip',    'Retaining lip depth',     'mm', _mm_val('1.20 mm'))
+            pi.addValueInput('hook_lip_h',  'Lip height',              'mm', _mm_val('1.60 mm'))
+            pi.addValueInput('hook_fillet', 'Hook base fillet (0=off)','mm', _mm_val('3.00 mm'))
+            pi.addValueInput('base_chamfer','Base chamfer (0=off)',    'mm', _mm_val('0.50 mm'))
+
+            # -- Features group -----------------------------------------------
+            grp_feat = inputs.addGroupCommandInput('grp_features', 'Features')
+            fi = grp_feat.children
+
+            fi.addBoolValueInput('center_cut',   'Center opening',         True, '', True)
+            fi.addBoolValueInput('corner_slots', 'Corner plunger slots',   True, '', True)
+            fi.addBoolValueInput('side_slots',   'Side plunger slots',     True, '', True)
+            fi.addBoolValueInput('vents',        'Ventilation holes',      True, '', False)
+            inp_vent_d = fi.addValueInput('vent_d', 'Vent diameter', 'mm',
+                                          _mm_val('6.00 mm'))
+            inp_vent_d.isVisible = False
+
+        except Exception:
+            adsk.core.Application.get().userInterface.messageBox(
+                'Dialog creation failed:\n' + traceback.format_exc(),
+                'Enclosure Bracket')
+
+
+class _CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
+    def __init__(self):
+        super().__init__()
+
+    def notify(self, args):
+        try:
+            changed = args.input
+            inputs = args.inputs
+
+            if changed.id == 'preset':
+                p = PRESETS[changed.selectedItem.index]
+                inputs.itemById('dev_w').value        = p['dev_w']        * MM
+                inputs.itemById('dev_d').value        = p['dev_d']        * MM
+                inputs.itemById('dev_h').value        = p['dev_h']        * MM
+                inputs.itemById('dev_corner_r').value = p['dev_corner_r'] * MM
+                dd_style = inputs.itemById('hook_style')
+                if p['hook_style'] == 'round':
+                    dd_style.listItems.item(0).isSelected = True
+                else:
+                    dd_style.listItems.item(1).isSelected = True
+                inputs.itemById('hook_leg').value     = p['hook_leg']     * MM
+                inputs.itemById('hook_leg').isVisible = (p['hook_style'] == 'square')
+
+            elif changed.id == 'hook_style':
+                inputs.itemById('hook_leg').isVisible = \
+                    (changed.selectedItem.name == 'Square')
+
+            elif changed.id == 'vents':
+                inputs.itemById('vent_d').isVisible = changed.value
+
+        except Exception:
+            adsk.core.Application.get().userInterface.messageBox(
+                'Input changed handler failed:\n' + traceback.format_exc(),
+                'Enclosure Bracket')
+
+
+class _CommandExecuteHandler(adsk.core.CommandEventHandler):
+    def __init__(self):
+        super().__init__()
+
+    def notify(self, args):
+        b = None
+        ui = None
+        try:
+            app = adsk.core.Application.get()
+            ui = app.userInterface
+            design = adsk.fusion.Design.cast(app.activeProduct)
+            if not design:
+                ui.messageBox('Open a Fusion 360 design first, then run this '
+                              'add-in.', 'Enclosure Bracket')
+                return
+
+            inputs = args.command.commandInputs
+
+            hook_style_name = inputs.itemById('hook_style').selectedItem.name
+            hook_style = 'round' if hook_style_name == 'Round' else 'square'
+
+            dev = {
+                'label':        inputs.itemById('preset').selectedItem.name,
+                'dev_w':        _get_mm(inputs, 'dev_w'),
+                'dev_d':        _get_mm(inputs, 'dev_d'),
+                'dev_h':        _get_mm(inputs, 'dev_h'),
+                'dev_corner_r': _get_mm(inputs, 'dev_corner_r'),
+                'hook_style':   hook_style,
+            }
+            if hook_style == 'square':
+                dev['hook_leg'] = _get_mm(inputs, 'hook_leg')
+
+            vents_on = _get_bool(inputs, 'vents')
+            cfg = {
+                'fit_clear':       _get_mm(inputs, 'fit_clear'),
+                'hook_h_adj':      0.20,
+                'plate_t':         _get_mm(inputs, 'plate_t'),
+                'plate_corner_r':  None,
+                'hook_t':          _get_mm(inputs, 'hook_t'),
+                'hook_lip':        _get_mm(inputs, 'hook_lip'),
+                'hook_lip_h':      _get_mm(inputs, 'hook_lip_h'),
+                'hook_inner_r':    1.50,
+                'hook_fillet':     _get_mm(inputs, 'hook_fillet'),
+                'base_chamfer':    _get_mm(inputs, 'base_chamfer'),
+                'waist_d_x':       None,
+                'waist_d_y':       None,
+                'waist_margin':    3.00,
+                'center_cut':      _get_bool(inputs, 'center_cut'),
+                'center_l':        None,
+                'center_w':        None,
+                'slot_w':          6.60,
+                'inset_w':         9.40,
+                'inset_t':         3.00,
+                'corner_slots':    _get_bool(inputs, 'corner_slots'),
+                'corner_slot_len': None,
+                'side_slots':      _get_bool(inputs, 'side_slots'),
+                'side_slot_axis':  'auto',
+                'side_slot_len':   None,
+                'edge_margin':     2.50,
+                'straps':          [],
+                'extra_slots':     [],
+                'vents':           vents_on,
+                'vent_d':          _get_mm(inputs, 'vent_d') if vents_on else 6.0,
+                'vent_pitch':      10.00,
+                'vent_pattern':    'hex',
+                'vent_margin':     2.50,
+            }
+
+            design.designType = adsk.fusion.DesignTypes.ParametricDesignType
+            try:
+                design.fusionUnitsManager.distanceDisplayUnits = \
+                    adsk.fusion.DistanceUnits.MillimeterDistanceUnits
+            except Exception:
+                pass
+
+            preset_idx  = inputs.itemById('preset').selectedItem.index
+            preset_key  = PRESETS[preset_idx]['key']
+            root = design.rootComponent
+            try:
+                occ  = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+                comp = occ.component
+                comp.name = 'Bracket_' + preset_key
+            except RuntimeError:
+                # Part Design mode only allows one component — build in root.
+                comp = root
+
+            b    = Builder(app, ui, design, comp)
+            info = build(b, dev, cfg)
+
+            msg = [
+                'Bracket generated: ' + dev['label'],
+                '',
+                'Hook style      : ' + info['style'],
+                'Plate           : %.1f x %.1f x %.1f mm'
+                % (info['plate_l'], info['plate_w'], b.pval('plate_t')),
+                'Corner radius   : %.2f mm' % info['corner_r'],
+                'Hook height     : %.2f mm (device is %.2f mm)'
+                % (info['hook_h'], dev['dev_h']),
+            ]
+            if info['style'] == 'square':
+                msg.append('Hook leg        : %.1f mm' % info['hook_leg'])
+            msg += [
+                'Waist depth     : %.1f mm (X) / %.1f mm (Y)'
+                % (info['waist_d_x'], info['waist_d_y']),
+                'Central opening : %.1f x %.1f mm'
+                % (info['center_l'], info['center_w']),
+                'Slots           : %d' % info['n_slots'],
+            ]
+            if b.notes:
+                msg += [''] + b.notes
+            if b.warnings:
+                msg += ['', 'Warnings:'] + ['  - ' + w for w in b.warnings]
+            msg += ['',
+                    'Edit values under Modify > Change Parameters.',
+                    'CHECK FIT against the real device before printing.']
+            ui.messageBox('\n'.join(msg), 'Enclosure Bracket Generator')
+
+        except Exception:
+            stage = b.stage if b else 'startup'
+            if ui:
+                ui.messageBox('Build failed during: %s\n\n%s'
+                              % (stage, traceback.format_exc()),
+                              'Enclosure Bracket Generator – Error')
+
+
+class _CommandDestroyHandler(adsk.core.CommandEventHandler):
+    def __init__(self):
+        super().__init__()
+
+    def notify(self, args):
+        pass
+
+
+# =============================================================================
+#  Add-in entry points
+# =============================================================================
 
 def run(context):
-    ui = None
-    b = None
+    global _handlers
+    _handlers = []
     try:
         app = adsk.core.Application.get()
-        ui = app.userInterface
-        design = adsk.fusion.Design.cast(app.activeProduct)
-        if not design:
-            ui.messageBox('Open a Fusion design first, then run this script.')
+        ui  = app.userInterface
+
+        old = ui.commandDefinitions.itemById(CMD_ID)
+        if old:
+            old.deleteMe()
+
+        cmd_def = ui.commandDefinitions.addButtonDefinition(
+            CMD_ID, CMD_NAME, CMD_DESC, '')
+
+        on_created = _CommandCreatedHandler()
+        cmd_def.commandCreated.add(on_created)
+        _handlers.append(on_created)
+
+        ws = ui.workspaces.itemById(WORKSPACE_ID)
+        if not ws:
+            all_ws = [ui.workspaces.item(i).id
+                      for i in range(ui.workspaces.count)]
+            ui.messageBox(
+                'Workspace "%s" not found.\n\nAvailable workspaces:\n%s'
+                % (WORKSPACE_ID, '\n'.join(all_ws)),
+                'Enclosure Bracket – debug')
             return
 
-        design.designType = adsk.fusion.DesignTypes.ParametricDesignType
-        try:
-            design.fusionUnitsManager.distanceDisplayUnits = \
-                adsk.fusion.DistanceUnits.MillimeterDistanceUnits
-        except Exception:
-            pass
-
-        if PRESET not in PRESETS:
-            ui.messageBox('Unknown PRESET "%s".\nAvailable: %s'
-                          % (PRESET, ', '.join(sorted(PRESETS))))
+        panel = ws.toolbarPanels.itemById(PANEL_ID)
+        if not panel:
+            all_panels = [ws.toolbarPanels.item(i).id
+                          for i in range(ws.toolbarPanels.count)]
+            ui.messageBox(
+                'Panel "%s" not found in workspace "%s".\n\n'
+                'Available panels:\n%s'
+                % (PANEL_ID, WORKSPACE_ID, '\n'.join(all_panels)),
+                'Enclosure Bracket – debug')
             return
-        dev = PRESETS[PRESET]
 
-        root = design.rootComponent
-        occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
-        comp = occ.component
-        comp.name = 'Bracket_' + PRESET
-
-        b = Builder(app, ui, design, comp)
-        info = build(b, dev, CFG)
-
-        msg = [
-            'Bracket generated: %s' % dev.get('label', PRESET),
-            '',
-            'Hook style      : %s' % info['style'],
-            'Plate           : %.1f x %.1f x %.1f mm'
-            % (info['plate_l'], info['plate_w'], b.pval('plate_t')),
-            'Corner radius   : %.2f mm' % info['corner_r'],
-            'Hook height     : %.2f mm (device is %.2f mm)'
-            % (info['hook_h'], dev['dev_h']),
-        ]
-        if info['style'] == 'square':
-            msg.append('Hook leg        : %.1f mm' % info['hook_leg'])
-        msg += [
-            'Waist depth     : %.1f mm (X) / %.1f mm (Y)'
-            % (info['waist_d_x'], info['waist_d_y']),
-            'Central opening : %.1f x %.1f mm'
-            % (info['center_l'], info['center_w']),
-            'Slots           : %d' % info['n_slots'],
-        ]
-        if b.notes:
-            msg += [''] + b.notes
-        if b.warnings:
-            msg += ['', 'Warnings:'] + ['  - ' + w for w in b.warnings]
-        msg += ['',
-                'Edit any value under Modify > Change Parameters.',
-                'CHECK THE FIT against the real device before printing.']
-        ui.messageBox('\n'.join(msg), 'Enclosure Bracket Generator')
+        ctrl = panel.controls.addCommand(cmd_def)
+        ctrl.isPromoted = True
 
     except Exception:
-        stage = b.stage if b else 'startup'
-        if ui:
-            ui.messageBox('The script failed during: %s\n\n%s'
-                          % (stage, traceback.format_exc()),
-                          'Enclosure Bracket Generator - error')
-        else:
-            print(traceback.format_exc())
+        adsk.core.Application.get().userInterface.messageBox(
+            'Add-in failed to start:\n' + traceback.format_exc(),
+            'Enclosure Bracket')
+
+
+def stop(context):
+    try:
+        app = adsk.core.Application.get()
+        ui  = app.userInterface
+
+        ws = ui.workspaces.itemById(WORKSPACE_ID)
+        if ws:
+            panel = ws.toolbarPanels.itemById(PANEL_ID)
+            if panel:
+                ctrl = panel.controls.itemById(CMD_ID)
+                if ctrl:
+                    ctrl.deleteMe()
+
+        cmd_def = ui.commandDefinitions.itemById(CMD_ID)
+        if cmd_def:
+            cmd_def.deleteMe()
+
+        _handlers.clear()
+
+    except Exception:
+        pass

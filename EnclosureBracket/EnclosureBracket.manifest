@@ -1,10 +1,11 @@
 {
     "autodeskProduct": "Fusion360",
-    "type": "script",
-    "author": "Martin",
+    "type": "addin",
+    "author": "Martin Kuna",
     "description": {
         "": "Parametric device mounting bracket generator for structured media enclosures."
     },
+    "version":	"0.1",
     "supportedOS": "windows|mac",
     "editEnabled": true
 }
