@@ -3,3 +3,8 @@ __pycache__/
 *.f3d
 *.f3z
 .DS_Store
+.vscode/
+.DS_STORE
+.DS_Store
+venv
+.env
