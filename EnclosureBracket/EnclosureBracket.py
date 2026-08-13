@@ -814,6 +814,8 @@ def build(b, dev, cfg):
             if waist_on_y else 90.0
         a_lo = math.degrees(math.atan2(-cy, waist_cx - cx)) \
             if waist_on_x else 0.0
+        a_hi = min(a_hi, 90.0)
+        a_lo = max(a_lo,  0.0)
         if (a_hi - a_lo) > 324.0 or (a_hi - a_lo) < 4.0:
             a_lo, a_hi = 0.0, 90.0
         for sx, sy in signs:
@@ -1319,6 +1321,8 @@ class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         try:
             cmd = args.command
             cmd.isRepeatable = False
+            cmd.setDialogInitialSize(420, 800)
+            cmd.setDialogMinimumSize(380, 500)
 
             on_exec = _CommandExecuteHandler()
             cmd.execute.add(on_exec)
