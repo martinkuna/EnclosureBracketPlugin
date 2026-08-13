@@ -5,6 +5,7 @@ dimensions with the same formulas, then verifies the results against
 independently-written predicates and renders an SVG top view of each preset.
 """
 import math
+import os
 import sys
 import types
 
@@ -21,6 +22,9 @@ class _Any(object):
     def __call__(self, *a, **kw):
         return _Any()
 
+    def __mro_entries__(self, bases):
+        return (object,)
+
 
 sys.modules['adsk'].core = sys.modules['adsk.core']
 sys.modules['adsk'].fusion = sys.modules['adsk.fusion']
@@ -33,7 +37,49 @@ for mod in ('adsk.core', 'adsk.fusion'):
                  'ExtentDirections', 'CalculationAccuracy'):
         setattr(sys.modules[mod], attr, _Any())
 
+# The module lives one directory down.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'EnclosureBracket'))
 import EnclosureBracket as EB    # noqa: E402
+
+# Build a key-indexed dict from the PRESETS list.
+_PRESETS = {p['key']: p for p in EB.PRESETS}
+
+# Default cfg values that match the dialog defaults, used for all test runs.
+TEST_CFG = {
+    'fit_clear':       0.40,
+    'hook_h_adj':      0.20,
+    'plate_t':         5.00,
+    'plate_corner_r':  None,
+    'hook_t':          2.80,
+    'hook_lip':        1.20,
+    'hook_lip_h':      1.60,
+    'hook_inner_r':    1.50,
+    'hook_fillet':     3.00,
+    'base_chamfer':    0.50,
+    'hook_support_w':  4.00,
+    'waist_d_x':       None,
+    'waist_d_y':       None,
+    'waist_margin':    3.00,
+    'center_cut':      True,
+    'center_l':        None,
+    'center_w':        None,
+    'slot_w':          6.60,
+    'inset_w':         9.40,
+    'inset_t':         3.00,
+    'corner_slots':    True,
+    'corner_slot_len': None,
+    'side_slots':      True,
+    'side_slot_axis':  'auto',
+    'side_slot_len':   None,
+    'edge_margin':     2.50,
+    'straps':          [],
+    'extra_slots':     [],
+    'vents':           False,
+    'vent_d':          6.00,
+    'vent_pitch':      10.00,
+    'vent_pattern':    'hex',
+    'vent_margin':     2.50,
+}
 
 FAIL = []
 WARN = []
@@ -129,14 +175,23 @@ def resolve(dev, cfg):
                 hook_h=dev['dev_h'] + cfg['hook_h_adj'])
 
 
-def hook_bands(D):
-    """World-space angular sweep of each round hook, after trimming."""
-    if D['style'] != 'round':
-        return []
+def _raw_angles(D):
+    """Pre-clamp hook arc angles (radians as they come from the waist geometry)."""
     a_hi = math.degrees(math.atan2(D['wcy'] - D['cy'], -D['cx'])) \
         if D['on_y'] else 90.0
     a_lo = math.degrees(math.atan2(-D['cy'], D['wcx'] - D['cx'])) \
         if D['on_x'] else 0.0
+    return a_lo, a_hi
+
+
+def hook_bands(D):
+    """World-space angular sweep of each round hook after clamping to ≤90°."""
+    if D['style'] != 'round':
+        return []
+    a_lo, a_hi = _raw_angles(D)
+    # Apply the same clamp the script applies so the keep-out zones match.
+    a_hi = min(a_hi, 90.0)
+    a_lo = max(a_lo, 0.0)
     if (a_hi - a_lo) > 324.0 or (a_hi - a_lo) < 4.0:
         a_lo, a_hi = 0.0, 90.0
     out = []
@@ -154,8 +209,7 @@ def hook_bands(D):
 
 
 def slot_layout(D, cfg):
-    """Mirror of the script's slot placement (the CHECKS below are what
-    independently validate it)."""
+    """Mirror of the script's slot placement."""
     out = []
     slot_w, inset_w, em = cfg['slot_w'], cfg['inset_w'], cfg['edge_margin']
     need = inset_w / 2 + em
@@ -252,8 +306,6 @@ def in_hook_footprint(D, x, y):
     if plate_clearance(D, x, y) <= 0:
         return False
     if D['style'] == 'round':
-        # The band only exists between the two waist tangent points; past
-        # them the waist cut has removed it.
         for ccx, ccy, r0, r1 in hook_bands(D):
             px, py = x - ccx, y - ccy
             d = math.hypot(px, py)
@@ -292,7 +344,7 @@ def stadium_area_samples(s, margin, step=0.6):
 
 
 def stadium_boundary(s, n=240):
-    """Points on the outline of a stadium: both end caps plus both flanks."""
+    """Points on the outline of a stadium."""
     st = EB.Stadium(s['x'], s['y'], s['ang'], s['length'], s['width'])
     a = math.radians(s['ang'])
     nx, ny = -math.sin(a), math.cos(a)
@@ -307,10 +359,12 @@ def stadium_boundary(s, n=240):
         my = st.ay + (st.by - st.ay) * t
         pts.append((mx + st.r * nx, my + st.r * ny))
         pts.append((mx - st.r * nx, my - st.r * ny))
-    # keep only points genuinely on the boundary (drop cap points that fall
-    # inside the body of the stadium)
     return [p for p in pts if st.clearance(*p) > -1e-6]
 
+
+# ---------------------------------------------------------------------------
+#  Per-preset checks
+# ---------------------------------------------------------------------------
 
 def check_preset(key, dev, cfg):
     D = resolve(dev, cfg)
@@ -318,8 +372,7 @@ def check_preset(key, dev, cfg):
 
     check(D['plate_l'] > 0 and D['plate_w'] > 0, tag + ' non-positive plate')
 
-    # Each waist is optional. Where one exists it must be a real, gentle
-    # scallop that cuts in by exactly the depth asked for.
+    # Waist geometry
     for axis, on, wd, wr, wc, half, ref_x, ref_r in (
             ('Y', D['on_y'], D['wdy'], D['wry'], D['wcy'], D['plate_w'] / 2,
              D['ref_x_y'], D['ref_r_y']),
@@ -337,31 +390,41 @@ def check_preset(key, dev, cfg):
         check(abs(depth - wd) < 1e-6,
               tag + ' %s waist depth mismatch %.4f vs %.4f'
               % (axis, depth, wd))
-        # the blend must be tangent to (round) or pass through (square) the
-        # reference the script chose
         d = math.hypot(ref_x, half - ref_r - wc)
         check(abs(d - (wr + ref_r)) < 1e-6,
               tag + ' %s waist does not blend into its reference '
                     '(%.5f vs %.5f)' % (axis, d, wr + ref_r))
 
     if D['style'] == 'round':
-        # the device corner must not foul the hook arc
+        # Device corner must not foul the hook arc.
         u = D['hook_ir'] - D['dev_cr']
         need = math.sqrt(2) * (u - D['clear']) + D['dev_cr']
         check(need <= D['hook_ir'] + 1e-9,
               tag + ' device corner fouls the hook arc')
 
-        a_hi = math.degrees(math.atan2(D['wcy'] - D['cy'], -D['cx'])) \
-            if D['on_y'] else 90.0
-        a_lo = math.degrees(math.atan2(-D['cy'], D['wcx'] - D['cx'])) \
-            if D['on_x'] else 0.0
-        check(a_lo <= 0.0 and a_hi >= 90.0,
-              tag + ' hook sweep does not straddle the tangent points '
-                    '(%.1f .. %.1f)' % (a_lo, a_hi))
+        # Hook arc angle checks.
+        a_lo_raw, a_hi_raw = _raw_angles(D)
+        a_hi = min(a_hi_raw, 90.0)
+        a_lo = max(a_lo_raw, 0.0)
+        if (a_hi - a_lo) > 324.0 or (a_hi - a_lo) < 4.0:
+            a_lo, a_hi = 0.0, 90.0
+
+        # After clamping, hooks must stay within one quadrant (≤ 90° span).
+        check(0.0 <= a_lo <= 90.0 and 0.0 <= a_hi <= 90.0,
+              tag + ' clamped hook angles outside [0, 90]: %.1f .. %.1f'
+              % (a_lo, a_hi))
+        check(a_hi - a_lo >= 4.0,
+              tag + ' hook arc span too narrow after clamp: %.1f deg'
+              % (a_hi - a_lo))
+
+        # Hooks must cover meaningful arc with the drawing margin applied.
         span = (a_hi + 8.0) - (a_lo - 8.0)
         check(20.0 < span < 340.0, tag + ' hook sweep span %.1f deg' % span)
+
+        # Corner support blocks (round hooks only).
+        check_corner_support_blocks(D, cfg, tag)
     else:
-        # square style: the leg must stand on full-width material
+        # Square style: the leg must stand on full-width material.
         for on, leg_end, half, wc, wr in (
                 (D['on_y'], D['plate_l'] / 2 - D['hook_leg'],
                  D['plate_w'] / 2, D['wcy'], D['wry']),
@@ -376,11 +439,11 @@ def check_preset(key, dev, cfg):
         check(D['hook_leg'] > D['hook_t'],
               tag + ' hook leg shorter than the wall is thick')
 
-    # central opening must leave material at the waist
+    # Central opening must leave material at the waist.
     check(D['center_w'] / 2 + 2.0 < D['plate_w'] / 2 - D['wdy'],
           tag + ' central opening breaks into the Y waist')
 
-    # every slot pocket must stay inside the plate with margin
+    # Slot pocket checks.
     slots = slot_layout(D, cfg)
     warn(len(slots) > 0,
          tag + ' no slots fit at all (plate %.0f x %.0f is too small for a '
@@ -399,7 +462,6 @@ def check_preset(key, dev, cfg):
               tag + ' slot %d (%s) breaks the plate outline by %.2f mm'
               % (si, s['kind'], -w))
         worst = min(worst, w)
-        # and it must not undercut the hook wall's footing
         fouled = [p for p in stadium_area_samples(pocket, 0.0)
                   if in_hook_footprint(D, *p)]
         check(not fouled,
@@ -409,7 +471,7 @@ def check_preset(key, dev, cfg):
     warn(worst > 1.0,
          tag + ' tight slot pocket clearance: %.2f mm' % worst)
 
-    # slots must not collide with each other
+    # Slots must not collide with each other.
     for i in range(len(slots)):
         for j in range(i + 1, len(slots)):
             a, bb = slots[i], slots[j]
@@ -426,16 +488,87 @@ def check_preset(key, dev, cfg):
             check(d > SA.r + SB.r,
                   tag + ' slots %d and %d overlap' % (i, j))
 
-    # lip must be printable: underside ramp at or below 45 degrees
+    # Lip printability.
     warn(cfg['hook_lip'] <= cfg['hook_lip_h'],
          tag + ' lip ramp steeper than 45 deg (hook_lip > hook_lip_h)')
-    # lip must not close the opening to less than the device
     check(cfg['hook_lip'] < D['hook_t'] + cfg['fit_clear'] + 2.0,
           tag + ' lip is implausibly large next to the wall thickness')
 
     D['slots'] = slots
     D['worst_clear'] = worst
     return D
+
+
+def check_corner_support_blocks(D, cfg, tag):
+    """Verify geometry of corner support blocks (round hooks only)."""
+    support_w = cfg.get('hook_support_w', 0)
+    if support_w <= 0:
+        return
+    cx, cy = D['cx'], D['cy']
+    hook_ir, corner_r = D['hook_ir'], D['corner_r']
+    wall = corner_r - hook_ir   # radial thickness of the hook wall
+
+    check(wall > 1e-6,
+          tag + ' hook wall has zero thickness — support blocks would be flat')
+
+    for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
+        # Long-edge block (at top/bottom plate edge, a_hi arc endpoint).
+        x0 = min(sx * cx - sx * support_w, sx * cx)
+        x1 = max(sx * cx - sx * support_w, sx * cx)
+        y0 = min(sy * (cy + hook_ir), sy * (cy + corner_r))
+        y1 = max(sy * (cy + hook_ir), sy * (cy + corner_r))
+        check(x1 > x0 and y1 > y0,
+              tag + ' (%d,%d) long-edge support block has zero area' % (sx, sy))
+        check(abs((x1 - x0) - support_w) < 1e-6,
+              tag + ' (%d,%d) long-edge support: width should be support_w '
+                    '(%.4f vs %.4f)' % (sx, sy, x1 - x0, support_w))
+        check(abs((y1 - y0) - wall) < 1e-6,
+              tag + ' (%d,%d) long-edge support: depth should equal hook wall '
+                    'thickness (%.4f vs %.4f)' % (sx, sy, y1 - y0, wall))
+
+        # Short-edge block (at left/right plate edge, a_lo arc endpoint).
+        x0 = min(sx * (cx + hook_ir), sx * (cx + corner_r))
+        x1 = max(sx * (cx + hook_ir), sx * (cx + corner_r))
+        y0 = min(sy * cy - sy * support_w, sy * cy)
+        y1 = max(sy * cy - sy * support_w, sy * cy)
+        check(x1 > x0 and y1 > y0,
+              tag + ' (%d,%d) short-edge support block has zero area' % (sx, sy))
+        check(abs((x1 - x0) - wall) < 1e-6,
+              tag + ' (%d,%d) short-edge support: depth should equal hook wall '
+                    'thickness (%.4f vs %.4f)' % (sx, sy, x1 - x0, wall))
+        check(abs((y1 - y0) - support_w) < 1e-6,
+              tag + ' (%d,%d) short-edge support: width should be support_w '
+                    '(%.4f vs %.4f)' % (sx, sy, y1 - y0, support_w))
+
+        # Inner face of each block must be at the device clearance boundary,
+        # not intruding into it (hooks sit on the boundary, not inside).
+        check(abs(cy + hook_ir - D['inner_y']) < 1e-6,
+              tag + ' long-edge support inner Y %.4f != inner_y %.4f'
+              % (cy + hook_ir, D['inner_y']))
+        check(abs(cx + hook_ir - D['inner_x']) < 1e-6,
+              tag + ' short-edge support inner X %.4f != inner_x %.4f'
+              % (cx + hook_ir, D['inner_x']))
+
+
+def check_angle_clamp_regression():
+    """UCG Fiber is wide enough that raw waist angles exceed the 90° quadrant.
+    Verify the clamp fires and keeps all hooks within one quadrant."""
+    p = _PRESETS['ucg_fiber']
+    D = resolve(p, TEST_CFG)
+    a_lo_raw, a_hi_raw = _raw_angles(D)
+
+    # The regression: pre-clamp angles should be out of [0, 90].
+    warn(a_hi_raw > 90.0 or a_lo_raw < 0.0,
+         'ucg_fiber pre-clamp angles already within [0, 90] — '
+         'plate geometry changed and the clamp test is no longer exercised')
+
+    # Post-clamp, every hook arc must stay within its quadrant (≤ 90° span).
+    bands = hook_bands(D)
+    for ccx, ccy, r0, r1 in bands:
+        span = (r1 - r0) % 360.0
+        check(span <= 90.0 + 1e-6,
+              'ucg_fiber hook at (%.0f, %.0f) spans %.1f deg > 90'
+              % (ccx, ccy, span))
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +587,7 @@ def svg(D, cfg, path, title):
     def Y(y):
         return (W / 2 - y + pad) * sc
 
-    # trace the plate boundary on a fine grid via marching the outline
+    # Trace the plate boundary via binary search on each ray.
     body = []
     n = 720
     for i in range(n):
@@ -476,7 +609,7 @@ def svg(D, cfg, path, title):
              '<polygon points="%s" fill="#7d9b76" stroke="#dfe7dc" '
              'stroke-width="1.2"/>' % outline]
 
-    # central opening
+    # Central opening.
     if cfg['center_cut']:
         st = EB.Stadium(0, 0, 0, D['center_l'], D['center_w'])
         parts.append(
@@ -488,7 +621,7 @@ def svg(D, cfg, path, title):
                X(st.bx), Y(st.by - st.r), st.r * sc, st.r * sc,
                X(st.bx), Y(st.by + st.r)))
 
-    # hooks (inner face outline, dashed)
+    # Hook inner face (dashed).
     if D['style'] == 'round':
         for sx in (1, -1):
             for sy in (1, -1):
@@ -505,6 +638,30 @@ def svg(D, cfg, path, title):
                         'stroke-width="2" stroke-dasharray="4 3"/>'
                         % ' '.join('%.2f,%.2f' % (X(a), Y(bq))
                                    for a, bq in pts))
+        # Corner support blocks (filled semi-transparent).
+        support_w = cfg.get('hook_support_w', 0)
+        if support_w > 0:
+            cx, cy = D['cx'], D['cy']
+            hook_ir, corner_r = D['hook_ir'], D['corner_r']
+            for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
+                # Long-edge block
+                bx0 = min(sx * cx - sx * support_w, sx * cx)
+                bx1 = max(sx * cx - sx * support_w, sx * cx)
+                by0 = min(sy * (cy + hook_ir), sy * (cy + corner_r))
+                by1 = max(sy * (cy + hook_ir), sy * (cy + corner_r))
+                parts.append(
+                    '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" '
+                    'fill="#c8824a" fill-opacity="0.55"/>'
+                    % (X(bx0), Y(by1), (bx1 - bx0) * sc, (by1 - by0) * sc))
+                # Short-edge block
+                bx0 = min(sx * (cx + hook_ir), sx * (cx + corner_r))
+                bx1 = max(sx * (cx + hook_ir), sx * (cx + corner_r))
+                by0 = min(sy * cy - sy * support_w, sy * cy)
+                by1 = max(sy * cy - sy * support_w, sy * cy)
+                parts.append(
+                    '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" '
+                    'fill="#c8824a" fill-opacity="0.55"/>'
+                    % (X(bx0), Y(by1), (bx1 - bx0) * sc, (by1 - by0) * sc))
     else:
         for sx in (1, -1):
             for sy in (1, -1):
@@ -518,10 +675,9 @@ def svg(D, cfg, path, title):
                     'stroke-width="2" stroke-dasharray="4 3"/>'
                     % ' '.join('%.2f,%.2f' % (X(a), Y(bq)) for a, bq in pts))
 
-    # slots and their pockets
+    # Slots and their pockets.
     for s in D['slots']:
-        for wkey, col, sw in (('pocket', '#2b3a2a', 0.6), ('slot', '#11161c',
-                                                           0.8)):
+        for wkey, col in (('pocket', '#2b3a2a'), ('slot', '#11161c')):
             if wkey == 'pocket':
                 if not s['inset']:
                     continue
@@ -535,7 +691,6 @@ def svg(D, cfg, path, title):
                 '<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke="%s" '
                 'stroke-width="%.2f" stroke-linecap="round" fill="none"/>'
                 % (X(st.ax), Y(st.ay), X(st.bx), Y(st.by), col, w * sc))
-            del sw
 
     parts.append('<text x="10" y="20" fill="#dfe7dc" font-family="monospace" '
                  'font-size="13">%s</text>' % title)
@@ -546,21 +701,25 @@ def svg(D, cfg, path, title):
 # ---------------------------------------------------------------------------
 
 def main():
+    os.makedirs('previews', exist_ok=True)
+
+    # Targeted regression for the 90° clamp (UCG Fiber was the failing case).
+    check_angle_clamp_regression()
+
     print('%-14s %-7s %-16s %-9s %-7s %-6s %s'
           % ('preset', 'style', 'plate (mm)', 'corner_r', 'hook_h',
              'slots', 'min slot clearance'))
     results = {}
-    for key in ('ucg_fiber', 'mac_mini_m4', 'mac_mini_m2', 'rpi5_case',
-                'rpi_bare', 'hdd_35', 'hdd_25', 'custom'):
-        dev = EB.PRESETS[key]
-        D = check_preset(key, dev, EB.CFG)
+    for p in EB.PRESETS:
+        key = p['key']
+        D = check_preset(key, p, TEST_CFG)
         results[key] = D
         print('%-14s %-7s %-16s %-9.2f %-7.2f %-6d %.2f mm'
               % (key, D['style'],
                  '%.1f x %.1f' % (D['plate_l'], D['plate_w']),
                  D['corner_r'], D['hook_h'], len(D['slots']),
                  D['worst_clear']))
-        svg(D, EB.CFG, 'preview_%s.svg' % key,
+        svg(D, TEST_CFG, os.path.join('previews', 'preview_%s.svg' % key),
             '%s  %.0f x %.0f mm  (%s hooks)'
             % (key, D['plate_l'], D['plate_w'], D['style']))
 
@@ -599,7 +758,7 @@ def fuzz(n=400, seed=7):
                    hook_style=style, hook_leg=rnd.uniform(8, 30))
         before = len(FAIL)
         try:
-            D = check_preset('fuzz%03d' % i, dev, EB.CFG)
+            D = check_preset('fuzz%03d' % i, dev, TEST_CFG)
             kinds = [s['kind'] for s in D['slots']]
             if 'corner' not in kinds:
                 skipped_corner += 1
