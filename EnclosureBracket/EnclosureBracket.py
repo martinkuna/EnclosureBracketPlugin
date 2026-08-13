@@ -781,6 +781,9 @@ def build(b, dev, cfg):
     if cfg['base_chamfer'] > 0:
         b.param('base_chamfer', '%.4f mm' % cfg['base_chamfer'], 'mm',
                 'Chamfer on the bottom face')
+    if style == 'round' and cfg.get('hook_support_w', 0) > 0:
+        b.param('hook_support_w', '%.4f mm' % cfg['hook_support_w'], 'mm',
+                'Corner hook support block width')
     if cfg['vents']:
         b.param('vent_d', '%.4f mm' % cfg['vent_d'], 'mm',
                 'Vent hole diameter')
@@ -862,6 +865,33 @@ def build(b, dev, cfg):
                   P('hook_lip_h'),
                   start_expr='%s + %s' % (P('plate_t'), P('hook_h')),
                   taper_expr=P('hook_taper'))
+
+    if style == 'round' and cfg.get('hook_support_w', 0) > 0:
+        b.stage = 'corner support blocks'
+        support_w = cfg['hook_support_w']
+        sk_sup = b.new_sketch('corner_supports')
+        sup_lines = sk_sup.sketchCurves.sketchLines
+        for sx, sy in signs:
+            # Long-edge support: at top/bottom plate edge (a_hi endpoint)
+            xs0 = sx * cx - sx * support_w
+            xs1 = sx * cx
+            ys0 = min(sy * (cy + hook_ir), sy * (cy + corner_r))
+            ys1 = max(sy * (cy + hook_ir), sy * (cy + corner_r))
+            sup_lines.addTwoPointRectangle(
+                _pt(min(xs0, xs1), ys0), _pt(max(xs0, xs1), ys1))
+            # Short-edge support: at left/right plate edge (a_lo endpoint)
+            xs0 = min(sx * (cx + hook_ir), sx * (cx + corner_r))
+            xs1 = max(sx * (cx + hook_ir), sx * (cx + corner_r))
+            ys0 = sy * cy - sy * support_w
+            ys1 = sy * cy
+            sup_lines.addTwoPointRectangle(
+                _pt(xs0, min(ys0, ys1)), _pt(xs1, max(ys0, ys1)))
+        b.close_sketch(sk_sup)
+        sup_profs = b.all_profiles(sk_sup)
+        if sup_profs.count > 0:
+            b.extrude(sup_profs,
+                      adsk.fusion.FeatureOperations.JoinFeatureOperation,
+                      P('hook_h'), start_expr=P('plate_t'))
 
     b.stage = 'trimming hooks to the plate outline'
     sk_trim = b.new_sketch('outline_trim')
@@ -1328,7 +1358,7 @@ class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd.execute.add(on_exec)
             _handlers.append(on_exec)
 
-            on_changed = _CommandInputChangedHandler()
+            on_changed = _CommandInputChangedHandler(cmd.commandInputs)
             cmd.inputChanged.add(on_changed)
             _handlers.append(on_changed)
 
@@ -1341,7 +1371,7 @@ class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             # -- Note ---------------------------------------------------------
             inputs.addTextBoxCommandInput(
                 'note', '',
-                '<b>Measure your device with calipers!</b>', 2, True)
+                '<b>Measure your device with calipers!</b>\nInfo for inputs can be found <a href=\"https://github.com/martinkuna/EnclosureBracketPlugin\">on our GitHub</a>.', 2, True)
 
             # -- Preset dropdown ----------------------------------------------
             dd = inputs.addDropDownCommandInput(
@@ -1376,7 +1406,7 @@ class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             inp_leg.isVisible = (p0['hook_style'] == 'square')
 
             # -- Plate & hooks group ------------------------------------------
-            grp_plt = inputs.addGroupCommandInput('grp_plate', 'Plate && hooks')
+            grp_plt = inputs.addGroupCommandInput('grp_plate', 'Plate & hooks')
             pi = grp_plt.children
 
             pi.addValueInput('plate_t',     'Plate thickness',        'mm', _mm_val('5.00 mm'))
@@ -1386,6 +1416,9 @@ class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             pi.addValueInput('hook_lip_h',  'Lip height',              'mm', _mm_val('1.60 mm'))
             pi.addValueInput('hook_fillet', 'Hook base fillet (0=off)','mm', _mm_val('3.00 mm'))
             pi.addValueInput('base_chamfer','Base chamfer (0=off)',    'mm', _mm_val('0.50 mm'))
+            inp_support = pi.addValueInput('hook_support_w',
+                                           'Corner support (0=off)',   'mm', _mm_val('4.00 mm'))
+            inp_support.isVisible = (p0['hook_style'] == 'round')
 
             # -- Features group -----------------------------------------------
             grp_feat = inputs.addGroupCommandInput('grp_features', 'Features')
@@ -1406,13 +1439,14 @@ class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
 
 class _CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
-    def __init__(self):
+    def __init__(self, root_inputs):
         super().__init__()
+        self._root_inputs = root_inputs
 
     def notify(self, args):
         try:
             changed = args.input
-            inputs = args.inputs
+            inputs = self._root_inputs
 
             if changed.id == 'preset':
                 p = PRESETS[changed.selectedItem.index]
@@ -1425,12 +1459,14 @@ class _CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                     dd_style.listItems.item(0).isSelected = True
                 else:
                     dd_style.listItems.item(1).isSelected = True
-                inputs.itemById('hook_leg').value     = p['hook_leg']     * MM
-                inputs.itemById('hook_leg').isVisible = (p['hook_style'] == 'square')
+                inputs.itemById('hook_leg').value         = p['hook_leg']     * MM
+                inputs.itemById('hook_leg').isVisible     = (p['hook_style'] == 'square')
+                inputs.itemById('hook_support_w').isVisible = (p['hook_style'] == 'round')
 
             elif changed.id == 'hook_style':
-                inputs.itemById('hook_leg').isVisible = \
-                    (changed.selectedItem.name == 'Square')
+                is_round = (changed.selectedItem.name == 'Round')
+                inputs.itemById('hook_leg').isVisible       = not is_round
+                inputs.itemById('hook_support_w').isVisible = is_round
 
             elif changed.id == 'vents':
                 inputs.itemById('vent_d').isVisible = changed.value
@@ -1485,6 +1521,7 @@ class _CommandExecuteHandler(adsk.core.CommandEventHandler):
                 'hook_inner_r':    1.50,
                 'hook_fillet':     _get_mm(inputs, 'hook_fillet'),
                 'base_chamfer':    _get_mm(inputs, 'base_chamfer'),
+                'hook_support_w':  _get_mm(inputs, 'hook_support_w'),
                 'waist_d_x':       None,
                 'waist_d_y':       None,
                 'waist_margin':    3.00,
