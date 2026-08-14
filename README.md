@@ -1,196 +1,245 @@
 # Enclosure Bracket Generator
 
-A Fusion 360 script that builds a parametric device-mounting tray for a
-structured media enclosure — the same family of part as your UCG-Fiber bracket,
-generalised so one script covers a Mac mini, a Pi, a hard drive, or anything
-else square or rectangular.
+A Fusion 360 Add-In that generates a parametric device-mounting bracket for
+structured media enclosures (Legrand On-Q, Leviton, and similar). Select a
+preset device, adjust parameters in the built-in dialog, and the add-in builds
+a complete bracket as a **native Fusion timeline** — real sketches, real
+features, real user parameters. Not a mesh or a dumb imported body.
 
-It builds a **native Fusion timeline** — real sketches, real features, real user
-parameters. Not an imported mesh or a dumb STEP body.
+Designed for FDM printing and sized for wall-mounted enclosures (worst-case
+load).
 
----
-
-## Running it
-
-1. `Utilities` → `ADD-INS` → `Scripts and Add-Ins` → `Scripts` tab → the green
-   **+** → point it at the folder containing `EnclosureBracket.py`.
-2. Open a **new, empty** design.
-3. Edit the `PRESET` line and the `CFG` block at the top of the script, save.
-4. Select the script and hit **Run**.
-
-A dialog reports the resolved dimensions and any warnings. The bracket lands in
-its own component named `Bracket_<preset>`.
-
-> User parameters are document-wide. One bracket per document, or set
-> `PARAM_PREFIX` (e.g. `'b2_'`) before generating a second one alongside it.
+![Bracket previews](previews/bracket_previews.png)
 
 ---
 
-## The two hook styles
+## Installation
 
-This was the main design problem, and it's worth understanding before you pick.
-
-A **circular** hook that wraps a corner can only be slightly larger than the
-device's own corner radius before the device's corner collides with it. Working
-the geometry out, the hook's inner radius can exceed the device corner radius
-by at most about **3.4 × the fit clearance** — with 0.4 mm clearance, roughly
-1.4 mm. So on a device with near-square corners, a corner arc collapses to a
-3–4 mm stub that grabs nothing.
-
-Hence:
-
-| `hook_style` | Shape | Tuned by | Use for |
-|---|---|---|---|
-| `'round'` | Arc wrapping the corner radius | `dev_corner_r` | Devices with genuinely rounded corners — UCG-Fiber, Mac mini |
-| `'square'` | L-shaped wall, straight legs down each face | `hook_leg` | Near-square corners — Pi, HDDs, most enclosures |
-
-In square style the hooks are built oversize and trimmed to the plate outline,
-so their outer corners pick up the plate's corner radius automatically.
+1. Download or clone this repository.
+2. In Fusion 360: **Utilities → ADD-INS → Scripts and Add-Ins → Add-Ins tab → ⊕**
+3. Navigate to and select the **`EnclosureBracket`** folder (the one that
+   contains `EnclosureBracket.py` and `EnclosureBracket.manifest`).
+4. Click **Run**. Optionally check **Run on Startup** so it loads automatically.
+5. The command appears in **SOLID → CREATE → Enclosure Bracket**.
 
 ---
 
-## Presets
+## Usage
 
-| Key | Device | Style |
+1. Open a new, empty Fusion 360 design (parametric mode).
+2. Click **Enclosure Bracket** in the CREATE menu.
+3. Choose a preset device or select **Custom device** and enter your own
+   measurements.
+4. Adjust plate and hook parameters as needed.
+5. Click **OK** — the bracket generates in its own component.
+
+> **Measure your device with calipers.** The preset dimensions are
+> estimates. A press-fit bracket is only as good as the numbers you feed it.
+> Always verify fit against the real device before printing.
+
+After generation, all key dimensions are live Fusion parameters under
+**Modify → Change Parameters**. Edit them and the model rebuilds.
+
+---
+
+## Device presets
+
+| Preset | Device | Hook style |
 |---|---|---|
-| `ucg_fiber` | UniFi Cloud Gateway Fiber | round |
-| `mac_mini_m4` | Mac mini (M4, 2024) | round |
-| `mac_mini_m2` | Mac mini (M1/M2) | round |
-| `rpi5_case` | Pi 5 in official case | square |
-| `rpi_bare` | Bare Pi 4B / 5 board | square |
-| `hdd_35` | 3.5" drive | square |
-| `hdd_25` | 2.5" drive / SSD | square |
-| `custom` | Blank slate | square |
-
-**Measure your device with calipers and correct the preset.** Several of these
-are marked `[VERIFY DIMENSIONS]` in the file — I could not confirm them, and a
-press-fit bracket is only as good as the numbers you feed it. The UCG-Fiber
-entry in particular is a placeholder; you have the real part.
+| UniFi Cloud Gateway Fiber | UCG Fiber | Round |
+| Mac mini (M4, 2024) | Mac mini M4 | Round |
+| Mac mini (M1/M2, 2020–2023) | Mac mini M1/M2 | Round |
+| Raspberry Pi 5 – official case | Pi 5 in case | Square |
+| Raspberry Pi bare board (4B/5) | Bare Pi PCB | Square |
+| 3.5 inch hard drive | 3.5″ HDD | Square |
+| 2.5 inch hard drive / SSD (9.5 mm) | 2.5″ HDD/SSD | Square |
+| Custom device | — | Square |
 
 ---
 
-## Parameters
+## Hook styles
 
-### Live in Fusion (`Modify` → `Change Parameters`)
+The choice of hook style depends on the device's corner geometry.
 
-These drive real sketch dimensions and feature extents, so edit and the model
-rebuilds:
+### Round hooks
+A circular arc that wraps the device's corner. Works well for devices with
+genuinely rounded corners (UCG Fiber, Mac mini). The arc is capped at 90° per
+corner so the device can always be removed.
 
-| Parameter | Meaning |
+The inner radius of the hook equals the device corner radius plus the fit
+clearance. Physics limits how much larger the hook can be before the device's
+own corner collides with the hook wall — roughly 3.4× the fit clearance (about
+1.4 mm at 0.4 mm clearance). On near-square corners this becomes a useless stub,
+which is why square hooks exist.
+
+**Corner support blocks** (controlled by *Corner support* in the dialog, default
+4 mm) add a small rectangular pad at the two endpoints of each hook arc to
+reinforce the junction with the plate surface.
+
+### Square hooks
+L-shaped walls with straight legs running down each face of the device. Reliable
+on near-square corners (Raspberry Pi, hard drives, most cases). The leg length
+controls how far the hook extends from the corner toward the centre of each edge.
+
+Hooks are built oversize and trimmed to the plate outline, so the outer corners
+of square hooks automatically pick up the plate's corner radius.
+
+---
+
+## Dialog parameters
+
+### Device dimensions
+
+| Field | Description |
 |---|---|
-| `dev_w`, `dev_d`, `dev_h`, `dev_corner_r` | The device. `plate_l`/`plate_w` follow automatically |
-| `fit_clear` | Per-side gap between device and hook inner face |
-| `plate_t` | Plate thickness (5 mm) |
-| `hook_t` | Hook wall thickness |
-| `hook_h` | Wall height to the underside of the lip; `dev_h + hook_h_adj` |
-| `hook_lip`, `hook_lip_h` | Retaining lip projection and its ramp height |
-| `corner_r`, `hook_ir`, `hook_leg` | Corner and hook geometry |
-| `waist_d_x`, `waist_d_y` | Scallop depth on each pair of edges |
-| `center_l`, `center_w` | Central opening |
-| **`slot_corner_len`, `slot_side_*_len`** | **Slot lengths — the ones you asked to be adjustable** |
-| `slot_corner_x/y`, `slot_side_*_pos` | Slot positions |
-| `slot_w` | Plunger shaft slot width (6.6) |
-| `inset_w`, `inset_t` | Plunger lip pocket width (9.4) and material left under it (3) |
-| `hook_fillet`, `base_chamfer` | Finishing |
+| Width (X) | Device width |
+| Depth (Y) | Device depth |
+| Height (Z) | Device height (determines hook wall height) |
+| Corner radius | Outer corner radius of the device |
+| Hook style | Round or Square (see above) |
+| Hook leg length | *Square only* — how far each L-arm extends from the corner |
 
-### Requires a re-run (edit `CFG`, run again)
+### Plate & hooks
 
-Hook style, slot **count**, slot **angle**, strap and vent layout. These change
-how many sketch entities exist, so they can't be a parameter tweak.
+| Field | Description |
+|---|---|
+| Plate thickness | Overall thickness of the mounting plate (default 5 mm) |
+| Fit clearance | Per-side gap between device and hook inner face (default 0.4 mm) |
+| Hook wall thickness | Wall thickness of the hook arms (default 2.8 mm = 7 perimeters at 0.4 mm) |
+| Retaining lip depth | Inward overhang that locks the device in (default 1.2 mm) |
+| Lip height | Height of the lip ramp (default 1.6 mm) |
+| Hook base fillet | Fillet radius at the junction between hook and plate (0 = off) |
+| Base chamfer | Chamfer on the bottom face to relieve elephant's foot (0 = off) |
+| Corner support | *Round hooks only* — support block width at arc endpoints (0 = off) |
+
+### Features
+
+| Field | Description |
+|---|---|
+| Center opening | Oval cutout in the middle of the plate to save material |
+| Corner plunger slots | Diagonal slots at the corners for plunger fasteners |
+| Side plunger slots | Slots on the long or short centreline |
+| Ventilation holes | Hex-pattern circular vents across the plate face |
+
+---
+
+## Plunger fasteners
+
+The bracket uses custom two-piece push-and-twist fasteners instead of
+conventional screws. The slot dimensions in the add-in are sized for:
+
+- Shaft diameter: 6.5 mm (slot width: 6.6 mm)
+- Lip diameter: 8.8 mm (pocket width: 9.4 mm)
+- Material under lip: 3.0 mm
+
+These match the enclosure mounting hole geometry. The slots are as long as
+the available material allows — the add-in scans the actual plate region and
+finds the longest unobstructed run, so you get maximum adjustment range
+without breaking the plate outline or fouling a hook wall.
 
 ---
 
 ## Slot placement
 
-Rather than a rule of thumb, the script **scans the actual plate region** — the
-rounded rectangle minus the waist scallops, minus the central opening, minus
-the hook footprints — and finds the longest run along each slot's axis with room
-for the full 9.4 mm lip pocket plus `edge_margin`. Slots come out as long as the
-material allows and no longer, which is what you asked for. Set
-`corner_slot_len` / `side_slot_len` to override.
+Rather than a heuristic, the add-in **scans the actual plate region** — the
+rounded rectangle minus the waist scallops, minus the central opening, minus the
+hook footprints — and finds the longest contiguous run along each slot's axis that
+has room for the full 9.4 mm lip pocket plus an edge margin.
 
-Corner slots are anchored at the **outboard** end of the usable run so they sit
-on the corner pad rather than drifting toward the middle, and they are held
-clear of the hook walls' footing — a pocket under a wall would leave it standing
-on a 3 mm ledge and the plunger head would foul it.
+Corner slots sit at the **outboard** end of the usable run so they land on the
+corner pad rather than drifting toward the middle. They are held clear of the
+hook walls' footing, since a pocket under a wall would leave it standing on a
+3 mm ledge.
 
-Side slots try the X centreline first and fall back to Y (`side_slot_axis`:
-`'auto'`, `'x'`, `'y'`, `'both'`). On a square device like a Mac mini there is
-often only room on one axis.
+Side slots try the X centreline first and fall back to Y when the X run is too
+short (configurable — auto / x / y / both).
 
-Nothing is constrained to the On-Q hole pattern — as you asked, aligning slots
-to real mounting points is left to you.
+Slot positions and lengths appear as live Fusion parameters after generation
+(`slot_corner_x`, `slot_corner_y`, `slot_corner_len`, `slot_side_x_len`, etc.).
 
-### Straps, extra slots, vents
+---
 
-```python
-'straps': [{'axis': 'x', 'width': 25.0, 'thick': 3.5, 'offset': None}],
+## Waist (hourglass outline)
 
-'extra_slots': [{'x': 0.0, 'y': 30.0, 'ang': 0.0, 'len': 30.0,
-                 'width': 6.6, 'inset': True}],
+The plate outline is scalloped on all four edges to reduce material and give the
+bracket a cleaner look. The scallop depth is scaled to `min(plate_length,
+plate_width)` so it stays proportional on elongated plates. On very
+small or extreme-aspect-ratio devices the scallop is omitted if there is no room.
 
-'vents': True, 'vent_d': 6.0, 'vent_pitch': 10.0, 'vent_pattern': 'hex',
+---
+
+## FDM printing
+
+| Setting | Recommendation |
+|---|---|
+| Orientation | Flat on plate, hooks pointing up. No support needed at defaults. |
+| Material | PETG or ASA. Media enclosures get warm; PLA creeps under sustained load at elevated temperature. |
+| Wall count | Default `hook_t` = 2.8 mm = 7 perimeters at 0.4 mm nozzle, essentially solid regardless of infill. |
+| Lip overhang | The retaining lip uses a tapered extrude — the underside is a ramp, not a flat overhang. Keep `hook_lip ≤ hook_lip_h` and the ramp stays at or below 45°, no support needed. |
+| Insertion | Hooks flex apart as you push the device past the lip (snap-fit). If it feels too stiff, reduce `hook_lip`. If the device rattles, reduce `hook_h_adj`. |
+
+---
+
+## Live parameters (after generation)
+
+Once generated, these drive the model directly without re-running the add-in:
+
+| Parameter | Description |
+|---|---|
+| `dev_w`, `dev_d`, `dev_h`, `dev_corner_r` | Device dimensions |
+| `fit_clear` | Per-side fit clearance |
+| `plate_t`, `hook_t`, `hook_h` | Plate and hook sizing |
+| `hook_lip`, `hook_lip_h` | Retaining lip |
+| `corner_r`, `hook_ir` | Corner and hook radii |
+| `waist_d_x`, `waist_d_y` | Waist scallop depths |
+| `center_l`, `center_w` | Central opening |
+| `slot_corner_len`, `slot_side_*_len` | Slot lengths |
+| `slot_corner_x/y`, `slot_side_*_pos` | Slot positions |
+| `hook_fillet`, `base_chamfer` | Finishing features |
+| `hook_support_w` | Corner support block width |
+
+Hook style, slot count, vent layout, and slot angles require re-running the
+add-in because they change the number or orientation of sketch entities.
+
+---
+
+## Geometry verification
+
+`verify.py` (at the repo root) stubs out the Fusion API so the module can be
+imported, then independently re-derives the geometry and checks it against
+hand-written predicates:
+
+- Every slot pocket stays inside the plate outline with margin
+- No slot pocket undercuts a hook wall's footing
+- No two slot pockets collide with each other
+- Waist scallops blend tangentially into the corner arcs and cut exactly the
+  depth requested
+- Round hook arcs stay within 90° per corner so the device can always be removed
+- Corner support blocks have the correct dimensions and land at the device
+  clearance boundary
+- ~400 randomised device sizes (45–260 × 40–220 mm, both hook styles) all pass
+
+Run it after any geometry change:
+
+```
+python verify.py
 ```
 
-Vent holes are culled analytically against the plate outline, the waists, the
-central opening and every slot pocket, so the pattern never breaks anything.
-
 ---
 
-## FDM notes
+## Repo structure
 
-Designed assuming the **worst case: a wall-mounted enclosure**, so the bracket
-is vertical and the hooks carry real load.
-
-- `hook_t` defaults to **2.8 mm** — seven perimeters at a 0.4 mm nozzle, so the
-  walls are essentially solid regardless of infill.
-- The lip is made with a **tapered extrude**, giving a ramp on the underside
-  instead of a flat overhang. Keep `hook_lip ≤ hook_lip_h` and that ramp stays
-  at or below 45°, so it prints without support. The outward half of the taper
-  is trimmed off flush with the plate edge.
-- `base_chamfer` (0.5 mm) relieves elephant's foot on the whole bottom face.
-- Print flat on the plate, hooks up. No support needed at defaults.
-- PETG or ASA over PLA — media enclosures get warm, and PLA creeps under
-  sustained load. For a heavy device mounted vertically this matters.
-- **Insertion is by flex**: the hooks spring apart as you push the device past
-  the lips. If it's too stiff, drop `hook_lip` to 0.8; if the device rattles,
-  reduce `hook_h_adj`. If you'd rather not flex it at all, set `hook_lip` to 0
-  and add a strap.
-
----
-
-## What was verified, and what wasn't
-
-I have no Fusion 360 in this environment, so **the API calls are unrun**. What I
-could check, I checked hard, with a separate harness (`verify.py`) that stubs
-the Fusion API, re-derives the geometry, and tests it against independently
-written predicates:
-
-- Every slot pocket stays inside the true plate region, with margin
-- No slot undercuts a hook wall's footing
-- No two slot pockets collide
-- Waist scallops blend tangentially into the corner arcs, cut exactly the depth
-  requested, and never exceed a sane blend radius
-- The device's own corner cannot foul a round hook
-- Hook sweeps straddle both tangent points
-- **2,300 randomised device sizes** from 45 × 40 mm to 260 × 220 mm, both hook
-  styles, all passing
-
-That found five real bugs, including a waist that cut 36 mm into each short edge
-of a long plate, and corner-slot pockets that broke the outline on every
-square-hook preset.
-
-What that testing **cannot** tell us is whether Fusion accepts every API call —
-particularly the mixed-unit parameter expressions, the sketch constraint sets,
-and the geometric edge selection used for the fillets. Those are wrapped so
-failures degrade to a warning in the summary dialog rather than killing the run,
-and the error dialog names the stage that failed. Expect a round of iteration on
-the first run; send me the message text and I'll fix it.
-
-Two known soft spots:
-
-- **Square style leaves a slight shoulder** where the waist meets the straight
-  edge, rather than a tangent blend. Raising `plate_corner_r` softens it.
-- **Sketch angular extents are baked in** — the hook sweep and slot angles come
-  from the script rather than from driven dimensions. Radii, lengths, widths and
-  positions are all live; angles need a re-run.
+```
+EnclosureBracket/
+  EnclosureBracket.py          Add-In entry point (run / stop)
+  EnclosureBracket.manifest    Fusion add-in manifest
+  commands/
+    generateBracket/
+      entry.py                 Dialog, event handlers, presets
+      build.py                 Fusion API build logic (Builder, build())
+  lib/
+    geometry.py                Pure-Python geometry helpers (no Fusion dependency)
+verify.py                      Standalone geometry test harness
+previews/                      SVG top-view previews per preset
+README.md                      This file
+```

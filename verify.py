@@ -37,12 +37,16 @@ for mod in ('adsk.core', 'adsk.fusion'):
                  'ExtentDirections', 'CalculationAccuracy'):
         setattr(sys.modules[mod], attr, _Any())
 
-# The module lives one directory down.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'EnclosureBracket'))
-import EnclosureBracket as EB    # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'EnclosureBracket'))
 
-# Build a key-indexed dict from the PRESETS list.
-_PRESETS = {p['key']: p for p in EB.PRESETS}
+from lib.geometry import (
+    _EPS, _seg_dist, _rounded_rect_inset,
+    waist_fit, make_plate_clearance, fit_on_ray,
+    HookBand, AxisStrip, Stadium,
+)
+from commands.generateBracket.entry import PRESETS
+
+_PRESETS = {p['key']: p for p in PRESETS}
 
 # Default cfg values that match the dialog defaults, used for all test runs.
 TEST_CFG = {
@@ -141,8 +145,8 @@ def resolve(dev, cfg):
         rxx = plate_w / 2 - hook_leg - wm
         rry = rrx = 0.0
 
-    fy = EB.waist_fit(rxy, rry, want_wdy)
-    fx = EB.waist_fit(rxx, rrx, want_wdx)
+    fy = waist_fit(rxy, rry, want_wdy)
+    fx = waist_fit(rxx, rrx, want_wdx)
     on_y, on_x = fy is not None, fx is not None
     wdy, wry = fy if on_y else (0.0, 0.0)
     wdx, wrx = fx if on_x else (0.0, 0.0)
@@ -215,14 +219,14 @@ def slot_layout(D, cfg):
     need = inset_w / 2 + em
     max_len = max(min(46.0, 0.32 * min(D['plate_l'], D['plate_w'])), 14.0)
     max_axis = max_len - slot_w
-    clear_fn = EB.make_plate_clearance(D['plate_l'], D['plate_w'],
-                                       D['corner_r'], D['discs'])
+    clear_fn = make_plate_clearance(D['plate_l'], D['plate_w'],
+                                    D['corner_r'], D['discs'])
     keep_outs = []
     if cfg['center_cut']:
-        keep_outs.append(EB.Stadium(0, 0, 0, D['center_l'], D['center_w']))
+        keep_outs.append(Stadium(0, 0, 0, D['center_l'], D['center_w']))
     for ccx, ccy, r0, r1 in hook_bands(D):
-        keep_outs.append(EB.HookBand(ccx, ccy, D['hook_ir'], D['corner_r'],
-                                     r0, r1))
+        keep_outs.append(HookBand(ccx, ccy, D['hook_ir'], D['corner_r'],
+                                  r0, r1))
 
     if cfg['corner_slots']:
         u = 1 / math.sqrt(2)
@@ -231,11 +235,11 @@ def slot_layout(D, cfg):
         else:
             s_cap = min(D['inner_x'] - need - D['cx'],
                         D['inner_y'] - need - D['cy']) / u
-        span = EB.fit_on_ray(D['cx'], D['cy'], u, u, need, clear_fn,
-                             keep_outs + [EB.AxisStrip('x'),
-                                          EB.AxisStrip('y')],
-                             -math.hypot(D['plate_l'], D['plate_w']) / 2,
-                             s_cap)
+        span = fit_on_ray(D['cx'], D['cy'], u, u, need, clear_fn,
+                          keep_outs + [AxisStrip('x'),
+                                       AxisStrip('y')],
+                          -math.hypot(D['plate_l'], D['plate_w']) / 2,
+                          s_cap)
         if span:
             s_lo, s_hi = span
             axis = min(s_hi - s_lo, max_axis)
@@ -250,7 +254,7 @@ def slot_layout(D, cfg):
                     out.append(dict(x=sx * gx, y=sy * gy, ang=ang,
                                     length=c_len, width=slot_w, inset=True,
                                     kind='corner'))
-                    keep_outs.append(EB.Stadium(
+                    keep_outs.append(Stadium(
                         sx * gx, sy * gy, ang,
                         c_len + inset_w - slot_w, inset_w))
 
@@ -264,8 +268,8 @@ def slot_layout(D, cfg):
                 break
             ux, uy = (1.0, 0.0) if ax == 'x' else (0.0, 1.0)
             lim = (D['plate_l'] if ax == 'x' else D['plate_w']) / 2
-            span = EB.fit_on_ray(0.0, 0.0, ux, uy, need, clear_fn, keep_outs,
-                                 0.0, lim)
+            span = fit_on_ray(0.0, 0.0, ux, uy, need, clear_fn, keep_outs,
+                              0.0, lim)
             if not span:
                 continue
             s_lo, s_hi = span
@@ -282,7 +286,7 @@ def slot_layout(D, cfg):
                 gy = 0.0 if ax == 'x' else s * pos
                 out.append(dict(x=gx, y=gy, ang=ang, length=s_len,
                                 width=slot_w, inset=True, kind='side-' + ax))
-                keep_outs.append(EB.Stadium(
+                keep_outs.append(Stadium(
                     gx, gy, ang, s_len + inset_w - slot_w, inset_w))
             placed = True
     return out
@@ -294,8 +298,8 @@ def slot_layout(D, cfg):
 
 def plate_clearance(D, x, y):
     """Signed distance into the plate region. Negative = outside."""
-    c = EB._rounded_rect_inset(x, y, D['plate_l'] / 2, D['plate_w'] / 2,
-                               D['corner_r'])
+    c = _rounded_rect_inset(x, y, D['plate_l'] / 2, D['plate_w'] / 2,
+                            D['corner_r'])
     for (cxx, cyy, rr) in D['discs']:
         c = min(c, math.hypot(x - cxx, y - cyy) - rr)
     return c
@@ -327,7 +331,7 @@ def in_hook_footprint(D, x, y):
 
 def stadium_area_samples(s, margin, step=0.6):
     """Grid samples covering a stadium inflated by `margin`."""
-    st = EB.Stadium(s['x'], s['y'], s['ang'], s['length'], s['width'])
+    st = Stadium(s['x'], s['y'], s['ang'], s['length'], s['width'])
     r = st.r + margin
     x0, x1 = min(st.ax, st.bx) - r, max(st.ax, st.bx) + r
     y0, y1 = min(st.ay, st.by) - r, max(st.ay, st.by) + r
@@ -345,7 +349,7 @@ def stadium_area_samples(s, margin, step=0.6):
 
 def stadium_boundary(s, n=240):
     """Points on the outline of a stadium."""
-    st = EB.Stadium(s['x'], s['y'], s['ang'], s['length'], s['width'])
+    st = Stadium(s['x'], s['y'], s['ang'], s['length'], s['width'])
     a = math.radians(s['ang'])
     nx, ny = -math.sin(a), math.cos(a)
     pts = []
@@ -477,14 +481,14 @@ def check_preset(key, dev, cfg):
             a, bb = slots[i], slots[j]
             wa = cfg['inset_w'] if a['inset'] else a['width']
             wb = cfg['inset_w'] if bb['inset'] else bb['width']
-            SA = EB.Stadium(a['x'], a['y'], a['ang'],
-                            a['length'] + wa - a['width'], wa)
-            SB = EB.Stadium(bb['x'], bb['y'], bb['ang'],
-                            bb['length'] + wb - bb['width'], wb)
-            d = EB._seg_dist(SA.ax, SA.ay, SB.ax, SB.ay, SB.bx, SB.by)
-            d = min(d, EB._seg_dist(SA.bx, SA.by, SB.ax, SB.ay, SB.bx, SB.by))
-            d = min(d, EB._seg_dist(SB.ax, SB.ay, SA.ax, SA.ay, SA.bx, SA.by))
-            d = min(d, EB._seg_dist(SB.bx, SB.by, SA.ax, SA.ay, SA.bx, SA.by))
+            SA = Stadium(a['x'], a['y'], a['ang'],
+                         a['length'] + wa - a['width'], wa)
+            SB = Stadium(bb['x'], bb['y'], bb['ang'],
+                         bb['length'] + wb - bb['width'], wb)
+            d = _seg_dist(SA.ax, SA.ay, SB.ax, SB.ay, SB.bx, SB.by)
+            d = min(d, _seg_dist(SA.bx, SA.by, SB.ax, SB.ay, SB.bx, SB.by))
+            d = min(d, _seg_dist(SB.ax, SB.ay, SA.ax, SA.ay, SA.bx, SA.by))
+            d = min(d, _seg_dist(SB.bx, SB.by, SA.ax, SA.ay, SA.bx, SA.by))
             check(d > SA.r + SB.r,
                   tag + ' slots %d and %d overlap' % (i, j))
 
@@ -611,7 +615,7 @@ def svg(D, cfg, path, title):
 
     # Central opening.
     if cfg['center_cut']:
-        st = EB.Stadium(0, 0, 0, D['center_l'], D['center_w'])
+        st = Stadium(0, 0, 0, D['center_l'], D['center_w'])
         parts.append(
             '<path d="M %.2f %.2f A %.2f %.2f 0 0 0 %.2f %.2f L %.2f %.2f '
             'A %.2f %.2f 0 0 0 %.2f %.2f Z" fill="#11161c" stroke="#dfe7dc" '
@@ -686,7 +690,7 @@ def svg(D, cfg, path, title):
             else:
                 w = s['width']
                 ln = s['length']
-            st = EB.Stadium(s['x'], s['y'], s['ang'], ln, w)
+            st = Stadium(s['x'], s['y'], s['ang'], ln, w)
             parts.append(
                 '<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke="%s" '
                 'stroke-width="%.2f" stroke-linecap="round" fill="none"/>'
@@ -710,7 +714,7 @@ def main():
           % ('preset', 'style', 'plate (mm)', 'corner_r', 'hook_h',
              'slots', 'min slot clearance'))
     results = {}
-    for p in EB.PRESETS:
+    for p in PRESETS:
         key = p['key']
         D = check_preset(key, p, TEST_CFG)
         results[key] = D
