@@ -280,18 +280,36 @@ class Builder(object):
                 L['bot'], L['top'], _pt(half_l * 0.45, 0.0)), w_expr)
 
         if symmetric:
-            # xConstructionAxis / yConstructionAxis were removed in newer
-            # Fusion builds; fall back gracefully when unavailable.
-            y_ax = self._sketch_axis(sk, 'y')
-            x_ax = self._sketch_axis(sk, 'x')
-            for e1, e2, ax in ((L['left'], L['right'], y_ax),
-                               (L['bot'],  L['top'],   x_ax)):
-                if ax is None:
-                    continue
-                try:
-                    cons.addSymmetry(e1, e2, ax)
-                except Exception:
-                    pass
+            # addSymmetry against xConstructionAxis/yConstructionAxis is
+            # unusable here: those axes were removed from Sketch in newer
+            # Fusion builds (_sketch_axis() returns None), which silently
+            # drops the centering constraint and lets the whole rectangle
+            # drift under later parameter edits (reproduced live: the plate
+            # loses its origin lock while hook geometry, dimensioned
+            # directly off sk.originPoint, stays correctly centered — the
+            # two disagree and the hooks appear to detach from the plate).
+            # Pin one point on the right/top line to an absolute
+            # origin-referenced half-length instead; combined with the
+            # offset (span) dimension above this fully and non-redundantly
+            # fixes both lines, independent of axis availability.
+            try:
+                self.set_dim(sk.sketchDimensions.addDistanceDimension(
+                    sk.originPoint, L['right'].startSketchPoint,
+                    adsk.fusion.DimensionOrientations
+                    .HorizontalDimensionOrientation,
+                    _pt(cx, cy - 4.0)), '(%s) / 2' % l_expr if l_expr
+                    else '%.4f mm' % half_l)
+            except Exception:
+                pass
+            try:
+                self.set_dim(sk.sketchDimensions.addDistanceDimension(
+                    sk.originPoint, L['top'].startSketchPoint,
+                    adsk.fusion.DimensionOrientations
+                    .VerticalDimensionOrientation,
+                    _pt(cx - 4.0, cy)), '(%s) / 2' % w_expr if w_expr
+                    else '%.4f mm' % half_w)
+            except Exception:
+                pass
 
         return {'arcs': A, 'lines': L}
 
@@ -321,12 +339,6 @@ class Builder(object):
                                     inner.startSketchPoint)
         cap1 = lines.addByTwoPoints(inner.endSketchPoint,
                                     outer.endSketchPoint)
-
-        for ln in (cap0, cap1):
-            try:
-                cons.addCoincident(outer.centerSketchPoint, ln)
-            except Exception:
-                pass
 
         if ri_expr:
             self.set_dim(sk.sketchDimensions.addRadialDimension(
@@ -651,26 +663,39 @@ def build(b, dev, cfg):
                 r0, r1 = -a_hi, -a_lo
             hook_bands.append((sx * cx, sy * cy, r0, r1))
 
-    sk_h = b.new_sketch('hooks')
+    hook_sketches = []
     if style == 'round':
+        # One sketch per corner: four near-identical arc bands sharing a
+        # sketch makes the VCS solver randomly report a corner as
+        # over-constrained (reproduced live; solver-order dependent, not a
+        # sign/geometry bug). Isolating each corner in its own sketch avoids
+        # the cross-corner interference entirely.
         margin = 8.0
-        for ccx, ccy, r0, r1 in hook_bands:
+        for i, (ccx, ccy, r0, r1) in enumerate(hook_bands):
+            sk_hi = b.new_sketch('hooks_%d' % i)
             b.draw_arc_band(
-                sk_h, ccx, ccy, corner_r + over, hook_ir,
+                sk_hi, ccx, ccy, corner_r + over, hook_ir,
                 r0 - margin, r1 + margin,
                 x_expr='%s/2 - %s' % (P('plate_l'), P('corner_r')),
                 y_expr='%s/2 - %s' % (P('plate_w'), P('corner_r')),
                 ri_expr=P('hook_ir'))
+            b.close_sketch(sk_hi)
+            hook_sketches.append(sk_hi)
     else:
+        sk_h = b.new_sketch('hooks')
         for sx, sy in signs:
             b.draw_L_hook(sk_h, sx, sy,
                           inner_x, inner_y,
                           plate_l / 2.0 + over, plate_w / 2.0 + over,
                           plate_l / 2.0 - hook_leg, plate_w / 2.0 - hook_leg,
                           cfg['hook_inner_r'])
-    b.close_sketch(sk_h)
+        b.close_sketch(sk_h)
+        hook_sketches.append(sk_h)
 
-    hook_profiles = b.all_profiles(sk_h)
+    hook_profiles = adsk.core.ObjectCollection.create()
+    for sk_i in hook_sketches:
+        for pi in range(sk_i.profiles.count):
+            hook_profiles.add(sk_i.profiles.item(pi))
     if hook_profiles.count == 0:
         raise RuntimeError('The hook sketch produced no profiles.')
     b.extrude(hook_profiles,
@@ -688,25 +713,71 @@ def build(b, dev, cfg):
     if style == 'round' and cfg.get('hook_support_w', 0) > 0:
         b.stage = 'corner support blocks'
         support_w = cfg['hook_support_w']
-        sk_sup = b.new_sketch('corner_supports')
-        sup_lines = sk_sup.sketchCurves.sketchLines
-        for sx, sy in signs:
+
+        # These were previously drawn with addTwoPointRectangle and no
+        # dimensions at all (reproduced live: the blocks stay frozen at
+        # their build-time literal position and visibly detach from the
+        # corner on any later parameter edit). Dimension two diagonal
+        # corners of each block from the origin, the same technique used
+        # for the hook arc bands above. One sketch per corner, for the same
+        # reason the hook bands are split: near-identical mirrored geometry
+        # sharing a sketch makes the VCS solver randomly over-constrain.
+        e_cx = '%s / 2 - %s' % (P('plate_l'), P('corner_r'))
+        e_cy = '%s / 2 - %s' % (P('plate_w'), P('corner_r'))
+        e_cx_in = '(%s) - %s' % (e_cx, P('hook_support_w'))
+        e_cy_in = '(%s) - %s' % (e_cy, P('hook_support_w'))
+        e_cy_hi = '(%s) + %s' % (e_cy, P('hook_ir'))
+        e_cy_cr = '(%s) + %s' % (e_cy, P('corner_r'))
+        e_cx_hi = '(%s) + %s' % (e_cx, P('hook_ir'))
+        e_cx_cr = '(%s) + %s' % (e_cx, P('corner_r'))
+
+        def _support_rect(sk, p_a, e_a, p_c, e_c):
+            lines = sk.sketchCurves.sketchLines
+            cons = sk.geometricConstraints
+            ax, ay = p_a
+            cxp, cyp = p_c
+            pts = [(ax, ay), (cxp, ay), (cxp, cyp), (ax, cyp)]
+            segs = [lines.addByTwoPoints(_pt(*pts[i]), _pt(*pts[(i + 1) % 4]))
+                    for i in range(4)]
+            for i in range(4):
+                try:
+                    cons.addCoincident(segs[i].endSketchPoint,
+                                       segs[(i + 1) % 4].startSketchPoint)
+                except Exception:
+                    pass
+            for i, seg in enumerate(segs):
+                try:
+                    if i % 2 == 0:
+                        cons.addHorizontal(seg)
+                    else:
+                        cons.addVertical(seg)
+                except Exception:
+                    pass
+            b._locate_point(sk, segs[0].startSketchPoint, ax, ay, *e_a)
+            b._locate_point(sk, segs[2].startSketchPoint, cxp, cyp, *e_c)
+
+        sup_sketches = []
+        for i, (sx, sy) in enumerate(signs):
+            sk_sup = b.new_sketch('corner_support_%d' % i)
             # Long-edge support: at top/bottom plate edge (a_hi endpoint)
-            xs0 = sx * cx - sx * support_w
-            xs1 = sx * cx
-            ys0 = min(sy * (cy + hook_ir), sy * (cy + corner_r))
-            ys1 = max(sy * (cy + hook_ir), sy * (cy + corner_r))
-            sup_lines.addTwoPointRectangle(
-                _pt(min(xs0, xs1), ys0), _pt(max(xs0, xs1), ys1))
+            _support_rect(
+                sk_sup,
+                (sx * cx, sy * (cy + corner_r)), (e_cx, e_cy_cr),
+                (sx * (cx - support_w), sy * (cy + hook_ir)),
+                (e_cx_in, e_cy_hi))
             # Short-edge support: at left/right plate edge (a_lo endpoint)
-            xs0 = min(sx * (cx + hook_ir), sx * (cx + corner_r))
-            xs1 = max(sx * (cx + hook_ir), sx * (cx + corner_r))
-            ys0 = sy * cy - sy * support_w
-            ys1 = sy * cy
-            sup_lines.addTwoPointRectangle(
-                _pt(xs0, min(ys0, ys1)), _pt(xs1, max(ys0, ys1)))
-        b.close_sketch(sk_sup)
-        sup_profs = b.all_profiles(sk_sup)
+            _support_rect(
+                sk_sup,
+                (sx * (cx + corner_r), sy * cy), (e_cx_cr, e_cy),
+                (sx * (cx + hook_ir), sy * cy - sy * support_w),
+                (e_cx_hi, e_cy_in))
+            b.close_sketch(sk_sup)
+            sup_sketches.append(sk_sup)
+
+        sup_profs = adsk.core.ObjectCollection.create()
+        for sk_i in sup_sketches:
+            for pi in range(sk_i.profiles.count):
+                sup_profs.add(sk_i.profiles.item(pi))
         if sup_profs.count > 0:
             b.extrude(sup_profs,
                       adsk.fusion.FeatureOperations.JoinFeatureOperation,
@@ -1084,6 +1155,11 @@ def _fillet_hook_base(b, style, plate_l, plate_w, corner_r,
         bb = edge.boundingBox
         if abs(bb.minPoint.z - z_target) > tol or \
            abs(bb.maxPoint.z - z_target) > tol:
+            continue
+        if style == 'round' and adsk.core.Arc3D.cast(edge.geometry) is None:
+            # Trim/support-block cuts leave short straight fragments whose
+            # midpoint can coincidentally land near the hook_ir radius; only
+            # an actual arc on that radius is the wall-base edge we want.
             continue
         pt = _edge_mid(edge)
         if pt is None:
