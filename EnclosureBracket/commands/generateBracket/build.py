@@ -1050,8 +1050,9 @@ def build(b, dev, cfg):
 
     if cfg['hook_fillet'] > 0:
         b.stage = 'hook base fillet'
+        support_w = cfg.get('hook_support_w', 0) if style == 'round' else 0
         _fillet_hook_base(b, style, plate_l, plate_w, corner_r,
-                          hook_ir, inner_x, inner_y)
+                          hook_ir, inner_x, inner_y, support_w)
 
     if cfg['base_chamfer'] > 0:
         b.stage = 'base chamfer'
@@ -1143,8 +1144,13 @@ def _edge_mid(edge):
     return pt if ok else None
 
 
+def _in_range(v, lo, hi, tol):
+    lo, hi = (lo, hi) if lo <= hi else (hi, lo)
+    return lo - tol <= v <= hi + tol
+
+
 def _fillet_hook_base(b, style, plate_l, plate_w, corner_r,
-                      hook_ir, inner_x, inner_y):
+                      hook_ir, inner_x, inner_y, support_w=0):
     z_target = b.pval('plate_t') * MM
     tol = 0.02 * MM
     cx = plate_l / 2.0 - corner_r
@@ -1156,7 +1162,8 @@ def _fillet_hook_base(b, style, plate_l, plate_w, corner_r,
         if abs(bb.minPoint.z - z_target) > tol or \
            abs(bb.maxPoint.z - z_target) > tol:
             continue
-        if style == 'round' and adsk.core.Arc3D.cast(edge.geometry) is None:
+        is_arc = adsk.core.Arc3D.cast(edge.geometry) is not None
+        if style == 'round' and not is_arc and support_w <= 0:
             # Trim/support-block cuts leave short straight fragments whose
             # midpoint can coincidentally land near the hook_ir radius; only
             # an actual arc on that radius is the wall-base edge we want.
@@ -1167,10 +1174,31 @@ def _fillet_hook_base(b, style, plate_l, plate_w, corner_r,
         x, y = pt.x / MM, pt.y / MM
         keep = False
         if style == 'round':
-            for sx in (1, -1):
-                for sy in (1, -1):
-                    if abs(math.hypot(x - sx * cx, y - sy * cy)
-                           - hook_ir) < 0.35:
+            if is_arc:
+                for sx in (1, -1):
+                    for sy in (1, -1):
+                        if abs(math.hypot(x - sx * cx, y - sy * cy)
+                               - hook_ir) < 0.35:
+                            keep = True
+            elif support_w > 0:
+                # Corner support blocks have no arc of their own; their
+                # analogue of the hook's inner wall (hook_ir radius) is the
+                # straight edge at hook_ir along the block's long axis. Tell
+                # long-edge vs. short-edge blocks apart by which way the
+                # edge's own bounding box is flattened.
+                dx = (bb.maxPoint.x - bb.minPoint.x) / MM
+                dy = (bb.maxPoint.y - bb.minPoint.y) / MM
+                if dy < dx:
+                    x_lo, x_hi = bb.minPoint.x / MM, bb.maxPoint.x / MM
+                    if abs(abs(y) - (cy + hook_ir)) < 0.35 and \
+                       _in_range(abs(x_lo), cx - support_w, cx, 0.5) and \
+                       _in_range(abs(x_hi), cx - support_w, cx, 0.5):
+                        keep = True
+                else:
+                    y_lo, y_hi = bb.minPoint.y / MM, bb.maxPoint.y / MM
+                    if abs(abs(x) - (cx + hook_ir)) < 0.35 and \
+                       _in_range(abs(y_lo), cy - support_w, cy, 0.5) and \
+                       _in_range(abs(y_hi), cy - support_w, cy, 0.5):
                         keep = True
         else:
             if abs(abs(x) - inner_x) < 0.35 or abs(abs(y) - inner_y) < 0.35:
